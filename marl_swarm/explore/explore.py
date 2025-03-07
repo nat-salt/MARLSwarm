@@ -44,14 +44,16 @@ class Explore(ExploreBaseParallelEnv):
             render_mode=render_mode,
         )
 
-    # BIG TEST FUNCTION TODO: GET THE FUCK RID OF IT
+    # TODO: GET THE FUCK RID OF IT
     def get_target_actions(self):
         """
         Generate actions that move agents toward their assigned grid targets
+        ONLY USED FOR TESTING CORRECT HGRID IMPLEMENTATION
         """
         actions = {}
         for agent in self.agents:
-            if agent in self.agent_targets:
+            # Check if agent has a valid target
+            if agent in self.agent_targets and self.agent_targets[agent] is not None:
                 current_pos = self._agent_location[agent]
                 target_pos = self.agent_targets[agent]
                 
@@ -71,7 +73,7 @@ class Explore(ExploreBaseParallelEnv):
                     # Very close to target, stop moving
                     actions[agent] = np.zeros(2)
             else:
-                # No target assigned, don't move
+                # No target assigned or target is None, don't move
                 actions[agent] = np.zeros(2)
         return actions
 
@@ -322,12 +324,55 @@ class Explore(ExploreBaseParallelEnv):
         return self.terminated
 
     def _compute_truncation(self):
+        # Check if we've reached max timesteps
         if self.timestep == self.max_timesteps:
             truncation = {agent: True for agent in self._agents_names}
             self.agents = []
-        else:
-            truncation = {agent: False for agent in self._agents_names}
-        return truncation
+            print("Simulation truncated: reached maximum timesteps")
+            return truncation
+        
+        # Check if all grid cells have been visited
+        all_visited = True
+        
+        # First check all coarse cells
+        for i in range(self.hgrid.grid1_count):
+            # If cell is subdivided, check all its fine cells
+            if i in self.hgrid.subdivided_cells:
+                # Check all fine grid cells for this coarse cell
+                for fine_id in self.hgrid.coarse_to_fine_ids(i):
+                    if not self.hgrid.grid_visited.get(fine_id, False):
+                        all_visited = False
+                        break
+            else:
+                # Check if this coarse cell is visited
+                if not self.hgrid.grid_visited.get(i, False):
+                    all_visited = False
+                    break
+        
+        if all_visited:
+            print("\n=== EXPLORATION COMPLETE ===")
+            print("All grid cells have been visited!")
+            truncation = {agent: True for agent in self._agents_names}
+            self.agents = []
+            
+            # Print final stats
+            coarse_visited = sum(1 for i in range(self.hgrid.grid1_count) if self.hgrid.grid_visited.get(i, False))
+            fine_visited = sum(1 for i in range(self.hgrid.grid1_count, self.hgrid.total_grid_count) 
+                              if self.hgrid.grid_visited.get(i, False))
+            
+            print(f"Coarse cells visited: {coarse_visited}/{self.hgrid.grid1_count}")
+            print(f"Fine cells visited: {fine_visited}/{self.hgrid.total_grid_count - self.hgrid.grid1_count}")
+            print(f"Total steps taken: {self.timestep}")
+            
+            # For each agent, print stats
+            for agent in self._agents_names:
+                pos = self._agent_location[agent]
+                print(f"{agent} final position: {pos}")
+            
+            return truncation
+            
+        # If not all cells are visited and we haven't reached max timesteps, continue
+        return {agent: False for agent in self._agents_names}
 
     def _compute_info(self):
         return {agent: {} for agent in self.agents}
@@ -422,38 +467,146 @@ class Explore(ExploreBaseParallelEnv):
 
         if not hasattr(self, "steps_at_target"):
             self.steps_at_target = {agent: 0 for agent in self._agents_names}
-    
+        
         new_locations = self._transition_state(actions)
         self._previous_location = self._agent_location
+
+        # Define need_assignment set at the beginning of the method
+        need_assignment = set()
 
         # Update only non-terminated agents' locations
         for agent in self._agent_location:
             if not self.terminated[agent]:
                 self._agent_location[agent] = new_locations[agent]
 
-        # Update the explored area based on the agents' new locations
+        # Update exploration status for agents at grid centers
         for agent in self._agent_location:
+            if not self.terminated[agent]:
+                agent_pos = self._agent_location[agent]
+                current_grid = self.hgrid.position_to_grid_id(agent_pos)
+
+                # Mark grid as visited when agent reaches center
+                if current_grid >= 0 and self.hgrid.is_at_center(agent_pos, current_grid):
+                    if not self.hgrid.grid_visited.get(current_grid, False):
+                        self.hgrid.mark_grid_visited(current_grid)
+                        
+                        # For fine grids, print more detailed information
+                        if current_grid >= self.hgrid.grid1_count:
+                            parent_id = self.hgrid.fine_to_coarse_id(current_grid)
+                            print(f"Agent {agent} has reached center of fine grid {current_grid} (parent: {parent_id})")
+                        else:
+                            print(f"Agent {agent} has reached center of coarse grid {current_grid}")
+                            
+                            # SUBDIVIDE WHEN A COARSE GRID CENTER IS REACHED
+                            if current_grid not in self.hgrid.subdivided_cells:
+                                print(f"Subdividing grid {current_grid} after center reached")
+                                self.hgrid.subdivide_cell(current_grid)
+                    
+                    # Clear target when agent reaches center of its target grid
+                    if (agent in self.agent_targets and self.agent_targets[agent] is not None and 
+                        current_grid == self.hgrid.position_to_grid_id(self.agent_targets[agent])):
+                        print(f"Agent {agent} has completed its target grid {current_grid}")
+                        self.agent_targets[agent] = None
+                        need_assignment.add(agent)  # Add to need_assignment immediately when target is cleared
+
+        # Force reassignment for agents if their target grid was just subdivided
+        for agent in self._agents_names:
+            if not self.terminated[agent]:
+                if agent in self.agent_targets and self.agent_targets[agent] is not None:
+                    target_grid = self.hgrid.position_to_grid_id(self.agent_targets[agent])
+                    if target_grid is not None and target_grid < self.hgrid.grid1_count and target_grid in self.hgrid.subdivided_cells:
+                        # Clear target to force reassignment to fine grids
+                        self.agent_targets[agent] = None
+                        print(f"Clearing {agent}'s target due to grid {target_grid} being subdivided")
+                        need_assignment.add(agent)
+
+        # Create current grid assignments dict
+        current_assignments = {}
+        
+        for agent in self._agents_names:
             if self.terminated[agent]:
                 continue
-                
+            
             pos = self._agent_location[agent]
-            x = int(pos[0])
-            y = int(pos[1])
-            z = int(pos[2])
+            current_grid = self.hgrid.position_to_grid_id(pos)
             
-            # Mark nearby area as explored (exploration radius)
-            exploration_radius = 1
-            for dx in range(-exploration_radius, exploration_radius + 1):
-                for dy in range(-exploration_radius, exploration_radius + 1):
-                    nx, ny = x + dx, y + dy
-                    if 0 <= nx < self.explored_area.shape[0] and 0 <= ny < self.explored_area.shape[1]:
-                        self.explored_area[nx, ny, 0] = 1.0
+            if current_grid >= 0:
+                current_assignments[agent] = current_grid
             
-            # Get current grid ID and update exploration status
-            grid_id = self.hgrid.position_to_grid_id(pos)
-            if grid_id >= 0:
-                exploration_status = self._get_grid_exploration_status(grid_id)
-                self.hgrid.update_exploration(grid_id, exploration_status)
+            # An agent needs assignment if:
+            # 1. It has no target
+            # 2. It reached its target (or is very close)
+            # 3. Its currently assigned grid has been marked as visited
+            if agent not in self.agent_targets or self.agent_targets[agent] is None:
+                need_assignment.add(agent)
+            elif self.agent_targets[agent] is not None:
+                target_pos = self.agent_targets[agent]
+                target_grid = self.hgrid.position_to_grid_id(target_pos)
+                distance = np.linalg.norm(pos[:2] - target_pos[:2])
+                
+                # Agent is close to target or the grid has been visited
+                # Check specifically if the grid is in a subdivided cell
+                if distance < 2.0 or self.hgrid.grid_visited.get(target_grid, False):
+                    need_assignment.add(agent)
+                    # Clear current target
+                    self.agent_targets[agent] = None
+                    print(f"Agent {agent} completed target or target grid is marked visited")
+            
+        # Assign new targets where needed
+        if need_assignment:
+            print(f"Agents needing assignment: {need_assignment}")
+            
+            # Check if there are any fine grids in subdivided cells that need exploration first
+            fine_grids = []
+            if self.hgrid.subdivided_cells:
+                for coarse_id in self.hgrid.subdivided_cells:
+                    for fine_id in self.hgrid.coarse_to_fine_ids(coarse_id):
+                        if not self.hgrid.grid_visited.get(fine_id, False):
+                            fine_grids.append(fine_id)
+            
+            # Prioritize assignment to fine grids if available
+            if fine_grids and need_assignment:
+                print(f"Fine grids available for assignment: {fine_grids}")
+                # Assign one agent to each fine grid
+                for agent in need_assignment:
+                    if fine_grids:
+                        grid_id = fine_grids.pop(0)
+                        grid_center = self.hgrid.get_center(grid_id)
+                        if grid_center is not None:
+                            self.agent_targets[agent] = grid_center
+                            self.hgrid.assign_agent(agent, grid_id)
+                            print(f"Agent {agent} assigned to fine grid {grid_id}")
+            
+            # For any remaining agents, use the standard assignment method
+            remaining_agents = [a for a in need_assignment if a not in self.agent_targets or self.agent_targets[a] is None]
+            if remaining_agents:
+                new_targets = self.hgrid.get_next_targets(self._agent_location, current_assignments)
+                for agent, grid_id in new_targets.items():
+                    if agent in remaining_agents and grid_id is not None:
+                        grid_center = self.hgrid.get_center(grid_id)
+                        if grid_center is not None:
+                            self.agent_targets[agent] = grid_center
+                            self.hgrid.assign_agent(agent, grid_id)
+                            print(f"Agent {agent} assigned new grid {grid_id}")
+        
+        # Store current grid IDs for next iteration
+        self.last_grid_ids = list(current_assignments.values())
+
+        # Update exploration area based on agent positions
+        for agent in self._agent_location:
+            if not self.terminated[agent]:
+                pos = self._agent_location[agent]
+                x, y, z = np.floor(pos).astype(int)
+                if 0 <= x < self.size and 0 <= y < self.size:
+                    # Mark current position as explored
+                    self.explored_area[x, y, 0] = 1.0
+                    
+                    # Update exploration status of the cell in HGrid
+                    grid_id = self.hgrid.position_to_grid_id(pos)
+                    if grid_id >= 0:
+                        # Calculate current exploration status of this grid
+                        exploration = self._get_grid_exploration_status(grid_id)
+                        self.hgrid.update_exploration(grid_id, exploration)
 
         # Calculate intermediates needed for reward
         terminations = self._compute_terminated()
@@ -461,84 +614,6 @@ class Explore(ExploreBaseParallelEnv):
         rewards = self._compute_reward()
         observations = self._compute_obs()
         infos = self._compute_info()
-
-        # Check which agents have reached their targets
-        agents_reached_targets = []
-        for agent in self._agents_names:
-            if agent in self.agent_targets and not self.terminated[agent]:
-                current_pos = self._agent_location[agent]
-                target_pos = self.agent_targets[agent]
-                
-                # Check if target is valid
-                if target_pos is not None:
-                    # Use 2D distance since z is constant anyway
-                    distance = np.linalg.norm(current_pos[:2] - target_pos[:2])
-                    
-                    # If agent is close to its target, mark it for reassignment
-                    if distance < 2.0:  # Increased threshold from 1.0 to 2.0
-                        agents_reached_targets.append(agent)
-                        print(f"Agent {agent} reached target at {target_pos}, distance: {distance:.2f}")
-                        self.steps_at_target[agent] = 0
-                    else:
-                        # Increment steps spent trying to reach this target
-                        self.steps_at_target[agent] += 1
-                        # Force reassignment after spending too long on one target
-                        if self.steps_at_target[agent] > 30:  # 30 steps timeout
-                            print(f"Agent {agent} timed out reaching target, reassigning")
-                            agents_reached_targets.append(agent)
-                            self.steps_at_target[agent] = 0
-
-        # Collect current grid IDs for all agents
-        grid_ids = []
-        for agent in self._agents_names:
-            if not self.terminated[agent]:
-                pos = self._agent_location[agent]
-                grid_id = self.hgrid.position_to_grid_id(pos)
-                if grid_id >= 0:
-                    grid_ids.append(grid_id)
-        
-        # Update grid assignments
-        current_assignments = {}
-        for agent in self._agents_names:
-            if not self.terminated[agent]:
-                pos = self._agent_location[agent]
-                grid_id = self.hgrid.position_to_grid_id(pos)
-                if grid_id >= 0:
-                    current_assignments[agent] = grid_id
-        
-        # Determine which agents need new target assignments
-        need_assignment = set(agents_reached_targets)
-        for agent in self._agents_names:
-            if (agent not in self.agent_targets or 
-                self.agent_targets[agent] is None or
-                self.terminated[agent]):
-                need_assignment.add(agent)
-        
-        if need_assignment and grid_ids:
-            # Get target assignments using HGrid
-            new_targets = self.hgrid.get_next_targets(self._agent_location, current_assignments)
-            
-            for agent, grid_id in new_targets.items():
-                if agent in need_assignment and grid_id is not None:
-                    grid_center = self.hgrid.get_center(grid_id)
-                    if grid_center is not None:
-                        self.agent_targets[agent] = grid_center
-                        self.hgrid.assign_agent(agent, grid_id)
-                        infos[agent]["new_target"] = grid_center
-        
-        # Add visualization and debug info
-        infos["grid_assignments"] = {agent: self.hgrid.position_to_grid_id(self._agent_location[agent]) 
-                                  for agent in self._agents_names if not self.terminated[agent]}
-        infos["exploration_progress"] = sum(self.hgrid.grid_explored.values()) / max(1, len(self.hgrid.grid_explored))
-        
-        # Update the last visited grid IDs for consistency
-        self.last_grid_ids = grid_ids
-
-        for grid_id in range(self.hgrid.grid1_count):
-            exploration = self.hgrid.grid_explored.get(grid_id, 0.0)
-            if 0.5 <= exploration < 0.9 and grid_id not in self.hgrid.subdivided_cells:
-                print(f"Subdividing grid {grid_id} with exploration {exploration:.2f}")
-                self.hgrid.subdivide_cell(grid_id)
 
         return observations, rewards, terminations, truncations, infos
     

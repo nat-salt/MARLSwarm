@@ -374,219 +374,48 @@ class ExploreBaseParallelEnv(ParallelEnv):
         # Draw the grid lines from HGrid
         if hasattr(self, "hgrid"):
             pts1, pts2 = self.hgrid.get_grid_markers()
+            coarse_count = (self.hgrid.level1_divisions[0] + 1) + (self.hgrid.level1_divisions[1] + 1)
             
-            # Count the markers for coarse grid lines
-            coarse_grid_markers_count = (self.hgrid.level1_divisions[0] + 1) + (self.hgrid.level1_divisions[1] + 1)
-            
-            # Draw coarse grid lines with thicker red lines
-            glColor3f(1.0, 0.0, 0.0)  # Red for coarse grid
+            # Draw coarse grid lines
+            glColor3f(0.7, 0.0, 0.0)  # Dark red for coarse grid
             glLineWidth(2.0)
             glBegin(GL_LINES)
-            for i in range(min(coarse_grid_markers_count, len(pts1))):
+            for i in range(min(coarse_count, len(pts1))):
                 glVertex3f(pts1[i][0], pts1[i][1], pts1[i][2])
                 glVertex3f(pts2[i][0], pts2[i][1], pts2[i][2])
             glEnd()
             
-            # Draw fine grid lines with thinner blue lines
-            if len(pts1) > coarse_grid_markers_count:
-                glColor3f(0.0, 0.5, 1.0)  # Light blue for fine grid
+            # Draw fine grid lines, but only for coarse cells that have been subdivided
+            if len(pts1) > coarse_count and hasattr(self.hgrid, "subdivided_cells"):
+                print(f"THE CELL HAS BEEN SUBDIVIDED")
+                glColor3f(1.0, 0.5, 0.5)  # Light red for fine grid
                 glLineWidth(1.0)
                 glBegin(GL_LINES)
-                for i in range(coarse_grid_markers_count, min(len(pts1), len(pts2))):
-                    glVertex3f(pts1[i][0], pts1[i][1], pts1[i][2])
-                    glVertex3f(pts2[i][0], pts2[i][1], pts2[i][2])
+                for i in range(coarse_count, min(len(pts1), len(pts2))):
+                    # Get which coarse cell this fine grid line belongs to
+                    # Simplified approach - just use first subdivided cell
+                    parent_cell = next(iter(self.hgrid.subdivided_cells)) if self.hgrid.subdivided_cells else -1
+                    # Only draw if at least one cell has been subdivided
+                    if self.hgrid.subdivided_cells:
+                        glVertex3f(pts1[i][0], pts1[i][1], pts1[i][2])
+                        glVertex3f(pts2[i][0], pts2[i][1], pts2[i][2])
                 glEnd()
+            
+            # Draw lines from agents to their assigned grid cells
+            if hasattr(self.hgrid, "agent_assignments"):
+                for agent, grid_id in self.hgrid.agent_assignments.items():
+                    grid_center = self.hgrid.get_center(grid_id)
+                    if grid_center is not None and agent in self._agent_location:
+                        agent_pos = self._agent_location[agent]
+                        glColor3f(0.0, 1.0, 0.0)  # Green lines
+                        glLineWidth(2.0)
+                        glBegin(GL_LINES)
+                        glVertex3f(agent_pos[0], agent_pos[1], agent_pos[2])
+                        glVertex3f(grid_center[0], grid_center[1], 0.1)
+                        glEnd()
             
             # Reset line width
             glLineWidth(1.5)
-
-            # Draw the grid lines
-            if hasattr(self, "hgrid"):
-                pts1, pts2 = self.hgrid.get_grid_markers()
-
-                # Draw level 1 (coarse) grid lines
-                glColor3f(0.7, 0.0, 0.0)  # Dark red color for main grid
-                glLineWidth(2.0)
-                glBegin(GL_LINES)
-                for i in range(min(len(pts1), len(pts2))):
-                    if i < self.hgrid.level1_divisions[0] + self.hgrid.level1_divisions[1] + 2:
-                        glVertex3f(pts1[i][0], pts1[i][1], pts1[i][2])
-                        glVertex3f(pts2[i][0], pts2[i][1], pts2[i][2])
-                glEnd()
-                
-                # Draw level 2 (fine) grid lines with thinner, lighter lines
-                if len(pts1) > self.hgrid.level1_divisions[0] + self.hgrid.level1_divisions[1] + 2:
-                    glColor3f(1.0, 0.5, 0.5)  # Light red for fine grid
-                    glLineWidth(1.0)
-                    glBegin(GL_LINES)
-                    for i in range(self.hgrid.level1_divisions[0] + self.hgrid.level1_divisions[1] + 2, min(len(pts1), len(pts2))):
-                        glVertex3f(pts1[i][0], pts1[i][1], pts1[i][2])
-                        glVertex3f(pts2[i][0], pts2[i][1], pts2[i][2])
-                    glEnd()
-                glLineWidth(1.5)  # Reset line width
-                
-                # Display grid exploration status
-                for grid_id in range(self.hgrid.total_grid_count):
-                    center = self.hgrid.get_center(grid_id)
-                    if center is not None:
-                        exploration = self.hgrid.grid_explored.get(grid_id, 0.0)
-                        
-                        # Find which agent is assigned to this grid
-                        assigned_agent = None
-                        for agent, assigned_grid in self.hgrid.agent_assignments.items():
-                            if assigned_grid == grid_id:
-                                assigned_agent = agent
-                                break
-                        
-                        # Create text with exploration percentage and agent assignment
-                        if assigned_agent:
-                            # Make the agent name more visible by removing "agent_" prefix
-                            agent_name = assigned_agent.replace("agent_", "A")
-                            exploration_text = f"{int(exploration * 100)}% ({agent_name})"
-                            
-                            # Use a bright color for assigned cells to make them stand out
-                            glColor3f(1.0, 1.0, 0.0)  # Bright yellow for assigned grids
-                        else:
-                            exploration_text = f"{int(exploration * 100)}%"
-                            # Use a more subtle color for unassigned cells
-                            glColor3f(0.7, 0.7, 0.7)  # Gray for unassigned grids
-                        
-                        # Draw larger text to improve visibility
-                        # Create a font object with larger size
-                        font = pygame.font.SysFont("Arial", 18, bold=True)
-                        text_surface = font.render(exploration_text, True, (255, 255, 0) if assigned_agent else (200, 200, 200))
-                        
-                        # Convert world coordinate to screen coordinate
-                        screen_x = int(center[0] / self.size * self.window_size)
-                        screen_y = int((self.size - center[1]) / self.size * self.window_size)
-                        
-                        # Get the pygame display surface and blit the text
-                        screen = pygame.display.get_surface()
-                        screen.blit(text_surface, (screen_x, screen_y))
-                        
-                        # Draw a colored rectangle around the assigned cell
-                        if assigned_agent:
-                            # Get the agent's index to use for color
-                            agent_idx = int(assigned_agent.split('_')[-1])
-                            
-                            # Define bright colors for each agent
-                            agent_colors = [
-                                (1.0, 0.0, 0.0),  # Red for agent_0
-                                (0.0, 1.0, 0.0),  # Green for agent_1
-                                (0.0, 0.0, 1.0),  # Blue for agent_2
-                                (1.0, 1.0, 0.0),  # Yellow for agent_3
-                                (1.0, 0.0, 1.0),  # Magenta for agent_4
-                                (0.0, 1.0, 1.0),  # Cyan for agent_5
-                            ]
-                            
-                            # Use the agent's color
-                            glColor3f(*agent_colors[agent_idx % len(agent_colors)])
-                            
-                            # Draw highlighted outline around the cell
-                            glLineWidth(3.0)
-                            cell_size = [self.size / self.hgrid.level1_divisions[i] for i in range(2)]
-                            
-                            # Calculate cell bounds
-                            min_x = center[0] - cell_size[0]/2
-                            max_x = center[0] + cell_size[0]/2
-                            min_y = center[1] - cell_size[1]/2
-                            max_y = center[1] + cell_size[1]/2
-                            
-                            glBegin(GL_LINE_LOOP)
-                            glVertex3f(min_x, min_y, 0.05)  # Slightly above ground
-                            glVertex3f(max_x, min_y, 0.05)
-                            glVertex3f(max_x, max_y, 0.05)
-                            glVertex3f(min_x, max_y, 0.05)
-                            glEnd()
-                            
-                            # Reset line width
-                            glLineWidth(1.5)
-
-                # Display grid exploration status and agent assignments
-                for grid_id in range(self.hgrid.total_grid_count):
-                    center = self.hgrid.get_center(grid_id)
-                    if center is not None:
-                        # Skip level 2 cells in non-subdivided regions to avoid clutter
-                        if grid_id >= self.hgrid.grid1_count:
-                            parent_id = self.hgrid.fine_to_coarse_id(grid_id)
-                            if parent_id not in self.hgrid.subdivided_cells:
-                                continue
-                                
-                        exploration = self.hgrid.grid_explored.get(grid_id, 0.0)
-                        
-                        # Find if this grid is assigned to any agent
-                        assigned_agent = None
-                        for agent, assigned_grid in self.hgrid.agent_assignments.items():
-                            if assigned_grid == grid_id:
-                                assigned_agent = agent
-                                break
-                        
-                        # Prepare text content
-                        is_fine_grid = grid_id >= self.hgrid.grid1_count
-                        grid_prefix = "F" if is_fine_grid else "C"  # Label as Fine or Coarse
-                        
-                        if assigned_agent:
-                            # Get agent number (e.g., agent_2 -> 2)
-                            agent_num = assigned_agent.split('_')[-1]
-                            text = f"{grid_prefix}{grid_id}: {int(exploration*100)}% [A{agent_num}]"
-                            color = (255, 255, 0)  # Yellow for assigned grids
-                        else:
-                            text = f"{grid_prefix}{grid_id}: {int(exploration*100)}%"
-                            color = (200, 200, 200)  # Gray for unassigned
-                            
-                        # Use smaller font for level 2 grids
-                        font_size = 14 if is_fine_grid else 18
-                        font = pygame.font.SysFont("Arial", font_size, bold=not is_fine_grid)
-                        text_surface = font.render(text, True, color)
-                        
-                        # Convert world coordinate to screen coordinate
-                        screen_x = int(center[0] / self.size * self.window_size)
-                        screen_y = int((self.size - center[1]) / self.size * self.window_size)
-                        
-                        # Center text on cell
-                        text_width, text_height = text_surface.get_size()
-                        screen_x -= text_width // 2
-                        screen_y -= text_height // 2
-                        
-                        # Get pygame surface and blit text
-                        screen = pygame.display.get_surface()
-                        screen.blit(text_surface, (screen_x, screen_y))
-                        
-                        # Draw colored rectangle outline around assigned cells
-                        if assigned_agent:
-                            agent_idx = int(assigned_agent.split('_')[-1])
-                            agent_colors = [
-                                (1.0, 0.0, 0.0),  # Red
-                                (0.0, 1.0, 0.0),  # Green
-                                (0.0, 0.0, 1.0),  # Blue
-                                (1.0, 1.0, 0.0),  # Yellow
-                                (1.0, 0.0, 1.0),  # Magenta
-                                (0.0, 1.0, 1.0),  # Cyan
-                            ]
-                            
-                            # Set the agent's color
-                            glColor3f(*agent_colors[agent_idx % len(agent_colors)])
-                            glLineWidth(3.0)
-                            
-                            # Draw the outline rectangle
-                            # Calculate cell size based on level
-                            if is_fine_grid:
-                                cell_size = [self.size / self.hgrid.level2_divisions[i] for i in range(2)]
-                            else:
-                                cell_size = [self.size / self.hgrid.level1_divisions[i] for i in range(2)]
-                                
-                            # Calculate boundaries
-                            half_width = cell_size[0] / 2
-                            half_height = cell_size[1] / 2
-                            
-                            glBegin(GL_LINE_LOOP)
-                            glVertex3f(center[0] - half_width, center[1] - half_height, 0.03)
-                            glVertex3f(center[0] + half_width, center[1] - half_height, 0.03)
-                            glVertex3f(center[0] + half_width, center[1] + half_height, 0.03)
-                            glVertex3f(center[0] - half_width, center[1] + half_height, 0.03)
-                            glEnd()
-                            
-                            glLineWidth(1.5)  # Reset line width
 
         pygame.event.pump()
         pygame.display.flip()

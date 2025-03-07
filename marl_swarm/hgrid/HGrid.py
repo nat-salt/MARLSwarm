@@ -16,11 +16,12 @@ class HGrid:
         self.env_size = env_size
         
         # Initialize grid levels
-        self.level1_divisions = config.get("level1_divisions", [1, 1, 1])  # Coarse grid
-        self.level2_divisions = config.get("level2_divisions", [2, 2, 1])  # Fine grid
+        self.level1_divisions = config.get("level1_divisions", [2, 2, 1])  # Coarse grid
+        self.level2_divisions = config.get("level2_divisions", [4, 4, 1])  # Fine grid
         
         # Track exploration status
         self.grid_explored = {}   # Map grid_id -> percentage explored (0.0 to 1.0)
+        self.grid_visited = {}
         self.agent_assignments = {} # Map agent_id -> grid_id
 
         self.subdivided_cells = set()
@@ -46,6 +47,76 @@ class HGrid:
         # Initialize all grids as unexplored
         for i in range(self.total_grid_count):
             self.grid_explored[i] = 0.0
+
+    def is_at_center(self, position, grid_id, threshold=1):
+        """Check if position is close to the center of grid cell"""
+        center = self.get_center(grid_id)
+        if center is None:
+            return False
+        
+        dist = np.linalg.norm(position[:2] - center[:2])
+        return dist < threshold
+    
+    def mark_grid_visited(self, grid_id):
+        """Mark a grid as having had its center visited"""
+        if 0 <= grid_id < self.total_grid_count:
+            self.grid_visited[grid_id] = True
+
+            # If marking a fine grid visited, also update its parents
+            if grid_id >= self.grid1_count:
+                parent_id = self.fine_to_coarse_id(grid_id)
+
+                # Check if all child grids are visited
+                all_visited = True
+                children = self.coarse_to_fine_ids(parent_id)
+                for child in children:
+                    if not self.grid_visited.get(child, False):
+                        all_visited = False
+                        break
+                
+                if all_visited:
+                    self.grid_visited[parent_id] = True
+                
+            return True
+        return False
+    
+    def get_unexplored_grids(self, level=None):
+        """Get list of unvisited grid IDs (optionally by level)"""
+        unvisited = []
+        
+        # First prioritize fine grid cells in subdivided coarse cells
+        if level == 2 or level is None:
+            # Get level 2 unvisited grids in subdivided cells
+            for i in range(self.grid1_count, self.total_grid_count):
+                if not self.grid_visited.get(i, False):
+                    # Only include fine grids that are in subdivided cells
+                    coarse_id = self.fine_to_coarse_id(i)
+                    if coarse_id in self.subdivided_cells:
+                        unvisited.append(i)
+        
+        # Then include coarse cells that aren't subdivided
+        if level == 1 or level is None:
+            # If we have fine grid unvisited cells, don't include coarse cells
+            if not unvisited or level == 1:
+                for i in range(self.grid1_count):
+                    if not self.grid_visited.get(i, False) and i not in self.subdivided_cells:
+                        unvisited.append(i)
+        
+        # If no unvisited grids found, fall back to exploration percentage
+        if not unvisited:
+            # First try fine grid cells that are less explored
+            for i in range(self.grid1_count, self.total_grid_count):
+                coarse_id = self.fine_to_coarse_id(i)
+                if coarse_id in self.subdivided_cells and self.grid_explored.get(i, 0.0) < 0.95:
+                    unvisited.append(i)
+            
+            # Then try coarse cells that are less explored
+            if not unvisited:
+                for i in range(self.grid1_count):
+                    if i not in self.subdivided_cells and self.grid_explored.get(i, 0.0) < 0.95:
+                        unvisited.append(i)
+        
+        return unvisited
     
     def _calculate_grid_centers(self, divisions):
         """Calculate centers of grid cells"""
@@ -121,23 +192,23 @@ class HGrid:
         else:
             return self.grid2_centers[grid_id - self.grid1_count]
     
-    def get_unexplored_grids(self, level=None):
-        """Get list of unexplored grid IDs (optionally by level)"""
-        unexplored = []
+    # def get_unexplored_grids(self, level=None):
+    #     """Get list of unexplored grid IDs (optionally by level)"""
+    #     unexplored = []
         
-        if level == 1 or level is None:
-            # Get level 1 unexplored grids
-            for i in range(self.grid1_count):
-                if self.grid_explored[i] < 0.95:  # Consider <95% as unexplored
-                    unexplored.append(i)
+    #     if level == 1 or level is None:
+    #         # Get level 1 unexplored grids
+    #         for i in range(self.grid1_count):
+    #             if self.grid_explored[i] < 0.95:  # Consider <95% as unexplored
+    #                 unexplored.append(i)
         
-        if level == 2 or level is None:
-            # Get level 2 unexplored grids
-            for i in range(self.grid1_count, self.total_grid_count):
-                if self.grid_explored[i] < 0.95:
-                    unexplored.append(i)
+    #     if level == 2 or level is None:
+    #         # Get level 2 unexplored grids
+    #         for i in range(self.grid1_count, self.total_grid_count):
+    #             if self.grid_explored[i] < 0.95:
+    #                 unexplored.append(i)
         
-        return unexplored
+    #     return unexplored
     
     def update_exploration(self, grid_id, explored_percentage):
         """Update exploration status of a grid cell"""
@@ -335,7 +406,21 @@ class HGrid:
         if 0 <= coarse_id < self.grid1_count:
             if coarse_id not in self.subdivided_cells:
                 self.subdivided_cells.add(coarse_id)
-                print(f"Cell {coarse_id} subdivided successfully")
+                
+                # Initialize fine grid cells
+                fine_ids = self.coarse_to_fine_ids(coarse_id)
+                for fine_id in fine_ids:
+                    # Transfer exploration status but mark as unvisited
+                    self.grid_explored[fine_id] = self.grid_explored.get(coarse_id, 0.0)
+                    self.grid_visited[fine_id] = False
+                    
+                # Force reassignment of agents assigned to this coarse cell
+                for agent_id, grid_id in list(self.agent_assignments.items()):
+                    if grid_id == coarse_id:
+                        # Clear the assignment so agent will be reassigned
+                        del self.agent_assignments[agent_id]
+                    
+                print(f"Cell {coarse_id} subdivided into {len(fine_ids)} fine cells")
                 return True
         return False
     
@@ -346,47 +431,48 @@ class HGrid:
         if current_assignments is None:
             current_assignments = {}
 
-        # Clear previous assignments that are sufficiently explored
+        # Clear previous assignments for grids that have been visited
         for agent_id, grid_id in list(self.agent_assignments.items()):
-            if self.grid_explored.get(grid_id, 0.0) > 0.85:  # Lowered from 0.9 to 0.85
-                print(f"Grid {grid_id} is sufficiently explored ({self.grid_explored.get(grid_id, 0.0):.2f}), clearing assignment")
+            if self.grid_visited.get(grid_id, False):
+                print(f"Grid {grid_id} has been visited (center reached), clearing assignment")
                 del self.agent_assignments[agent_id]
         
-        # Get unexplored grids from both levels, prioritizing level 1
-        unexplored = self.get_unexplored_grids()
+        # Get unvisited grids from both levels
+        unvisited = self.get_unexplored_grids()
         
-        # If no unexplored cells, use any cells that are less than 95% explored
-        if not unexplored:
-            print("No completely unexplored grids, using partially explored ones")
+        # If all grids have been visited, prioritize grids with less coverage
+        if not unvisited:
+            print("All grid centers visited, targeting less explored areas")
             for grid_id in range(self.total_grid_count):
                 if self.grid_explored.get(grid_id, 0.0) < 0.95:
-                    unexplored.append(grid_id)
+                    unvisited.append(grid_id)
         
         # If still no available grids, use any grid
-        if not unexplored:
+        if not unvisited:
             print("All grids highly explored, using any grid")
-            unexplored = list(range(self.total_grid_count))
+            unvisited = list(range(self.total_grid_count))
         
-        # Build grid assignment cost matrix with penalties for current assignments
+        # Build grid assignment cost matrix
         costs = {}
         for agent_id, pos in agent_positions.items():
             costs[agent_id] = {}
-            for grid_id in unexplored:
+            for grid_id in unvisited:
                 grid_center = self.get_center(grid_id)
                 if grid_center is not None:
                     # Calculate base distance cost
                     dist = np.linalg.norm(pos[:2] - grid_center[:2])  # 2D distance
                     
-                    # Add a LARGE penalty for current assignment to encourage movement
+                    # Add penalty for current assignment
                     current_penalty = 0
                     if current_assignments.get(agent_id) == grid_id:
-                        current_penalty = 100.0  # Very high penalty to avoid staying in same grid
+                        current_penalty = 100.0  # High penalty to avoid staying in same grid
                     
                     costs[agent_id][grid_id] = dist + current_penalty
         
+        
         # Greedy assignment using list to avoid set modification issues
         new_assignments = {}
-        available_grids = list(unexplored)
+        available_grids = list(unvisited)
         
         # Sort agents by priority (random order to break ties)
         import random
