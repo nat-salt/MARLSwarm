@@ -324,6 +324,20 @@ class Explore(ExploreBaseParallelEnv):
         return self.terminated
 
     def _compute_truncation(self):
+        if all(self.terminated.values()):
+            print("\n=== ALL AGENTS TERMINATED ===")
+            print(f"Simulation ended at timestep {self.timestep}")
+            truncation = {agent: True for agent in self._agents_names}
+            self.agents = []  # Empty the agents list to end the simulation
+            
+            # Print stats
+            print(f"Total steps taken: {self.timestep}")
+            for agent in self._agents_names:
+                pos = self._agent_location[agent]
+                print(f"{agent} final position: {pos}")
+                
+            return truncation
+
         # Check if we've reached max timesteps
         if self.timestep == self.max_timesteps:
             truncation = {agent: True for agent in self._agents_names}
