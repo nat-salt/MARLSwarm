@@ -1,4 +1,5 @@
 import numpy as np
+from .hungarian import hungarian_algorithm
 
 class HGrid:
     def __init__(self, env_size, config=None):
@@ -48,7 +49,7 @@ class HGrid:
         for i in range(self.total_grid_count):
             self.grid_explored[i] = 0.0
 
-    def is_at_center(self, position, grid_id, threshold=1):
+    def is_at_center(self, position, grid_id, threshold=0.5):
         """Check if position is close to the center of grid cell"""
         center = self.get_center(grid_id)
         if center is None:
@@ -424,6 +425,7 @@ class HGrid:
                 return True
         return False
     
+    # TODO: correct the logic so that appropriate cells are assigned to agents.
     def get_next_targets(self, agent_positions, current_assignments=None):
         """
         High-level planning function for RL - determines optimal next targets for agents
@@ -451,65 +453,113 @@ class HGrid:
         if not unvisited:
             print("All grids highly explored, using any grid")
             unvisited = list(range(self.total_grid_count))
-        
-        # Build grid assignment cost matrix
-        costs = {}
-        for agent_id, pos in agent_positions.items():
-            costs[agent_id] = {}
-            for grid_id in unvisited:
+
+        agents = list(agent_positions.keys())
+        grid_list = list(unvisited)
+
+        large_cost = 1000000.0
+        cost_matrix = np.full((len(agents), len(grid_list)), large_cost)
+
+        for i, agent_id in enumerate(agents):
+            pos = agent_positions[agent_id]
+            for j, grid_id in enumerate(grid_list):
                 grid_center = self.get_center(grid_id)
                 if grid_center is not None:
-                    # Calculate base distance cost
-                    dist = np.linalg.norm(pos[:2] - grid_center[:2])  # 2D distance
+                    dist = np.linalg.norm(pos - grid_center)
+
+                    exploration_factor = 1.0 - self.grid_explored.get(grid_id, 0.0)
+                    exploration_bonus = exploration_factor * 2.0
+
+                    grid_level_factor = 0
+                    if grid_id >= self.grid1_count:
+                        parent_id = self.fine_to_coarse_id(grid_id)
+                        if parent_id in self.subdivided_cells:
+                            grid_level_factor = -1.0
                     
-                    # Add penalty for current assignment
-                    current_penalty = 0
+                    reassignment_penalty = 0
                     if current_assignments.get(agent_id) == grid_id:
-                        current_penalty = 100.0  # High penalty to avoid staying in same grid
+                        reassignment_penalty = 5.0
                     
-                    costs[agent_id][grid_id] = dist + current_penalty
+                    cost_matrix[i, j] = dist - exploration_bonus + grid_level_factor + reassignment_penalty
         
-        
-        # Greedy assignment using list to avoid set modification issues
+        if len(agents) > len(grid_list):
+            padding = np.full((len(agents), len(agents) - len(grid_list)), large_cost)
+            cost_matrix = np.hstack((cost_matrix, padding))
+        elif len(grid_list) > len(agents):
+            pass
+
+        assignments = hungarian_algorithm(cost_matrix)
+
         new_assignments = {}
-        available_grids = list(unvisited)
-        
-        # Sort agents by priority (random order to break ties)
-        import random
-        agents = list(agent_positions.keys())
-        random.shuffle(agents)
-        
-        for agent_id in agents:
-            if not available_grids:
-                break
-                
-            # Find the best grid for this agent
-            best_grid = None
-            best_cost = float('inf')
-            
-            for grid_id in available_grids:
-                cost = costs[agent_id].get(grid_id, float('inf'))
-                if cost < best_cost:
-                    best_cost = cost
-                    best_grid = grid_id
-            
-            # Now make the assignment
-            if best_grid is not None:
-                # Make sure we're not reassigning to the same grid
-                current_grid = current_assignments.get(agent_id)
-                if best_grid != current_grid:
-                    new_assignments[agent_id] = best_grid
-                    available_grids.remove(best_grid)
-                    self.agent_assignments[agent_id] = best_grid
-                    print(f"Assigned agent {agent_id} to grid {best_grid}")
-                else:
-                    # Try to find any other grid if possible
-                    for alt_grid in available_grids:
-                        if alt_grid != current_grid:
-                            new_assignments[agent_id] = alt_grid
-                            available_grids.remove(alt_grid)
-                            self.agent_assignments[agent_id] = alt_grid
-                            print(f"Forced different assignment for agent {agent_id}: grid {alt_grid}")
-                            break
+        for agent_idx, grid_idx in assignments:
+            if grid_idx < len(grid_list):
+                agent_id = agents[agent_idx]
+                grid_id = grid_list[grid_idx]
+
+                new_assignments[agent_id] = grid_id
+                self.agent_assignments[agent_id] = grid_id
+                print(f"Optimally assigned agent {agent_id} to grid {grid_id}")
         
         return new_assignments
+        
+        # # Build grid assignment cost matrix
+        # costs = {}
+        # for agent_id, pos in agent_positions.items():
+        #     costs[agent_id] = {}
+        #     for grid_id in unvisited:
+        #         grid_center = self.get_center(grid_id)
+        #         if grid_center is not None:
+        #             # Calculate base distance cost
+        #             dist = np.linalg.norm(pos[:2] - grid_center[:2])  # 2D distance
+                    
+        #             # Add penalty for current assignment
+        #             current_penalty = 0
+        #             if current_assignments.get(agent_id) == grid_id:
+        #                 current_penalty = 100.0  # High penalty to avoid staying in same grid
+                    
+        #             costs[agent_id][grid_id] = dist + current_penalty
+        
+        
+        # # Greedy assignment using list to avoid set modification issues
+        # new_assignments = {}
+        # available_grids = list(unvisited)
+        
+        # # Sort agents by priority (random order to break ties)
+        # import random
+        # agents = list(agent_positions.keys())
+        # random.shuffle(agents)
+        
+        # for agent_id in agents:
+        #     if not available_grids:
+        #         break
+                
+        #     # Find the best grid for this agent
+        #     best_grid = None
+        #     best_cost = float('inf')
+            
+        #     for grid_id in available_grids:
+        #         cost = costs[agent_id].get(grid_id, float('inf'))
+        #         if cost < best_cost:
+        #             best_cost = cost
+        #             best_grid = grid_id
+            
+        #     # Now make the assignment
+        #     if best_grid is not None:
+        #         # Make sure we're not reassigning to the same grid
+        #         current_grid = current_assignments.get(agent_id)
+        #         if best_grid != current_grid:
+        #             new_assignments[agent_id] = best_grid
+        #             available_grids.remove(best_grid)
+        #             self.agent_assignments[agent_id] = best_grid
+        #             print(f"Assigned agent {agent_id} to grid {best_grid}")
+        #         else:
+        #             # Try to find any other grid if possible
+        #             for alt_grid in available_grids:
+        #                 if alt_grid != current_grid:
+        #                     new_assignments[agent_id] = alt_grid
+        #                     available_grids.remove(alt_grid)
+        #                     self.agent_assignments[agent_id] = alt_grid
+        #                     print(f"Forced different assignment for agent {agent_id}: grid {alt_grid}")
+        #                     break
+        
+        # return new_assignments

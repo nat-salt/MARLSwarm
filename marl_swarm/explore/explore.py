@@ -395,37 +395,22 @@ class Explore(ExploreBaseParallelEnv):
         # Track the last visited grid IDs for each agent
         self.last_grid_ids = []
 
-        # Initialize agent targets dictionary
+        # Initialize agent targets dictionary and current assignments
         self.agent_targets = {}
+        current_assignments = {}
         
-        # Assign each agent to an initial grid cell based on position
-        for agent in self._agents_names:
-            pos = self._agent_location[agent]
+        # Get initial targets for all agents
+        new_targets = self.hgrid.get_next_targets(self._agent_location, current_assignments)
+        
+        # Assign each agent to its initial grid
+        for agent, grid_id in new_targets.items():
+            if grid_id is not None:
+                grid_center = self.hgrid.get_center(grid_id)
+                if grid_center is not None:
+                    self.agent_targets[agent] = grid_center
+                    self.hgrid.assign_agent(agent, grid_id)
+                    print(f"Agent {agent} assigned initial grid {grid_id}")
 
-            grid_id = self.hgrid.position_to_grid_id(pos)
-
-            # Assign agent to unexplored grid
-            unexplored_grids = self.hgrid.get_unexplored_grids()
-            if unexplored_grids:
-                # Get already assigned grid IDs from the HGrid class
-                assigned_grid_ids = set(self.hgrid.agent_assignments.values())
-                available_grids = [g for g in unexplored_grids if g not in assigned_grid_ids]
-
-                if available_grids:
-                    # Assign to an available grid
-                    target_grid = available_grids[0]
-                else:
-                    # If all grids are assigned, just pick one from the unexplored list
-                    target_grid = random.choice(unexplored_grids)
-                    
-                # Get the target position
-                target_pos = self.hgrid.get_center(target_grid)
-
-                # Store as target for this agent
-                self.agent_targets[agent] = target_pos
-
-                # Mark agent assignment
-                self.hgrid.assign_agent(agent, target_grid)
 
         return self._compute_obs(), self._compute_info()
 
