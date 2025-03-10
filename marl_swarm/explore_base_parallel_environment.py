@@ -53,7 +53,7 @@ import pygame
 from pygame.locals import K_LEFT, K_RIGHT, K_UP, K_DOWN
 from pygame import DOUBLEBUF, OPENGL
 
-from .utils.graphic import axes, field, point, box_obstacle, terminated_point
+from marl_swarm.utils.graphic import axes, field, point, box_obstacle, terminated_point
 from crazy_rl.utils.utils import run_land, run_sequence, run_take_off
 
 # Constants

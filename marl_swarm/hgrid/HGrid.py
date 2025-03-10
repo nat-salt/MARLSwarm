@@ -1,5 +1,5 @@
 import numpy as np
-from .hungarian import hungarian_algorithm
+from marl_swarm.hgrid import hungarian_algorithm
 
 class HGrid:
     def __init__(self, env_size, config=None):

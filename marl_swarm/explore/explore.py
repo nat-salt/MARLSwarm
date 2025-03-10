@@ -2,8 +2,8 @@ import random
 
 import numpy as np
 from gymnasium import spaces
-from ..explore_base_parallel_environment import ExploreBaseParallelEnv, CLOSENESS_THRESHOLD
-from ..hgrid.HGrid import HGrid
+from marl_swarm import ExploreBaseParallelEnv, CLOSENESS_THRESHOLD
+from marl_swarm.hgrid import HGrid
 
 class Explore(ExploreBaseParallelEnv):
     metadata = {"render_modes": ["human"], "name": "explore_v0", "is_parallelizable": True, "render_fps": 20}
