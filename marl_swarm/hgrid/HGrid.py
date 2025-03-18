@@ -1,5 +1,5 @@
 import numpy as np
-from marl_swarm.hgrid import hungarian_algorithm
+from marl_swarm.hgrid.hungarian import hungarian_algorithm
 
 class HGrid:
     def __init__(self, env_size, config=None):
@@ -17,8 +17,12 @@ class HGrid:
         self.env_size = env_size
         
         # Initialize grid levels
-        self.level1_divisions = config.get("level1_divisions", [2, 2, 1])  # Coarse grid
-        self.level2_divisions = config.get("level2_divisions", [4, 4, 1])  # Fine grid
+        # self.level1_divisions = config.get("level1_divisions", [2, 2, 1])  # Coarse grid
+        # self.level2_divisions = config.get("level2_divisions", [4, 4, 1])  # Fine grid
+
+        # TODO: Refine this test
+        self.level1_divisions = [self.env_size // 5, self.env_size // 5, 1]
+        self.level2_divisions = [self.env_size // 2.5, self.env_size // 2.5, 1]
         
         # Track exploration status
         self.grid_explored = {}   # Map grid_id -> percentage explored (0.0 to 1.0)
@@ -501,65 +505,3 @@ class HGrid:
                 print(f"Optimally assigned agent {agent_id} to grid {grid_id}")
         
         return new_assignments
-        
-        # # Build grid assignment cost matrix
-        # costs = {}
-        # for agent_id, pos in agent_positions.items():
-        #     costs[agent_id] = {}
-        #     for grid_id in unvisited:
-        #         grid_center = self.get_center(grid_id)
-        #         if grid_center is not None:
-        #             # Calculate base distance cost
-        #             dist = np.linalg.norm(pos[:2] - grid_center[:2])  # 2D distance
-                    
-        #             # Add penalty for current assignment
-        #             current_penalty = 0
-        #             if current_assignments.get(agent_id) == grid_id:
-        #                 current_penalty = 100.0  # High penalty to avoid staying in same grid
-                    
-        #             costs[agent_id][grid_id] = dist + current_penalty
-        
-        
-        # # Greedy assignment using list to avoid set modification issues
-        # new_assignments = {}
-        # available_grids = list(unvisited)
-        
-        # # Sort agents by priority (random order to break ties)
-        # import random
-        # agents = list(agent_positions.keys())
-        # random.shuffle(agents)
-        
-        # for agent_id in agents:
-        #     if not available_grids:
-        #         break
-                
-        #     # Find the best grid for this agent
-        #     best_grid = None
-        #     best_cost = float('inf')
-            
-        #     for grid_id in available_grids:
-        #         cost = costs[agent_id].get(grid_id, float('inf'))
-        #         if cost < best_cost:
-        #             best_cost = cost
-        #             best_grid = grid_id
-            
-        #     # Now make the assignment
-        #     if best_grid is not None:
-        #         # Make sure we're not reassigning to the same grid
-        #         current_grid = current_assignments.get(agent_id)
-        #         if best_grid != current_grid:
-        #             new_assignments[agent_id] = best_grid
-        #             available_grids.remove(best_grid)
-        #             self.agent_assignments[agent_id] = best_grid
-        #             print(f"Assigned agent {agent_id} to grid {best_grid}")
-        #         else:
-        #             # Try to find any other grid if possible
-        #             for alt_grid in available_grids:
-        #                 if alt_grid != current_grid:
-        #                     new_assignments[agent_id] = alt_grid
-        #                     available_grids.remove(alt_grid)
-        #                     self.agent_assignments[agent_id] = alt_grid
-        #                     print(f"Forced different assignment for agent {agent_id}: grid {alt_grid}")
-        #                     break
-        
-        # return new_assignments
