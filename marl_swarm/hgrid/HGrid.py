@@ -21,8 +21,8 @@ class HGrid:
         # self.level2_divisions = config.get("level2_divisions", [4, 4, 1])  # Fine grid
 
         # TODO: Refine this test
-        self.level1_divisions = [self.env_size // 5, self.env_size // 5, 1]
-        self.level2_divisions = [self.env_size // 2.5, self.env_size // 2.5, 1]
+        self.level1_divisions = [int(self.env_size[0] / 5), int(self.env_size[1] / 5), 1]
+        self.level2_divisions = [int(self.env_size[0] / 2.5), int(self.env_size[1] / 2.5), 1]
         
         # Track exploration status
         self.grid_explored = {}   # Map grid_id -> percentage explored (0.0 to 1.0)
