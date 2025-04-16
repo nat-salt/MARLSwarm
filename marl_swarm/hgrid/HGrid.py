@@ -20,7 +20,6 @@ class HGrid:
         # self.level1_divisions = config.get("level1_divisions", [2, 2, 1])  # Coarse grid
         # self.level2_divisions = config.get("level2_divisions", [4, 4, 1])  # Fine grid
 
-        # TODO: Refine this test
         self.level1_divisions = [int(self.env_size[0] / 5), int(self.env_size[1] / 5), 1]
         self.level2_divisions = [int(self.env_size[0] / 2.5), int(self.env_size[1] / 2.5), 1]
         
@@ -487,10 +486,11 @@ class HGrid:
                     cost_matrix[i, j] = dist - exploration_bonus + grid_level_factor + reassignment_penalty
         
         if len(agents) > len(grid_list):
-            padding = np.full((len(agents), len(agents) - len(grid_list)), large_cost)
-            cost_matrix = np.hstack((cost_matrix, padding))
+            column_padding = np.full((len(agents), len(agents) - len(grid_list)), large_cost)
+            cost_matrix = np.hstack((cost_matrix, column_padding))
         elif len(grid_list) > len(agents):
-            pass
+            row_padding = np.full((len(grid_list) - len(agents), cost_matrix.shape[1]), large_cost)
+            cost_matrix = np.vstack((cost_matrix, row_padding))
 
         assignments = hungarian_algorithm(cost_matrix)
 

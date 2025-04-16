@@ -17,7 +17,8 @@ class Explore(ExploreBaseParallelEnv):
             num_obstacles: int,
             render_mode=None,
     ):
-        self.max_timesteps = 200
+        print("changes made have had an effect")
+        self.max_timesteps = 800
 
         self.num_drones = num_drones
         self.threshold = threshold
@@ -68,7 +69,7 @@ class Explore(ExploreBaseParallelEnv):
                     # Normalize direction vector and use as action
                     # Scale by 0.5 for smoother movement
                     normalized_direction = direction_xy / distance * 0.5
-                    actions[agent] = np.clip(normalized_direction, -1, 1)
+                    actions[agent] = np.clip(normalized_direction, -1, 0.1)
                 else:
                     # Very close to target, stop moving
                     actions[agent] = np.zeros(2)
@@ -111,7 +112,7 @@ class Explore(ExploreBaseParallelEnv):
             dtype=np.float32
         )
         
-        # 4. Nearest obstacle information (distance and direction)
+        # 4. Nearest obstacle information (distance and direction) TODO: this should really be all obstacles in detection range
         obstacle_space = spaces.Box(
             low=np.array([0, -1, -1], dtype=np.float32),  # [distance, dx, dy]
             high=np.array([self.size, 1, 1], dtype=np.float32),
@@ -119,7 +120,7 @@ class Explore(ExploreBaseParallelEnv):
             dtype=np.float32
         )
         
-        # 5. Nearest agent information
+        # 5. Nearest agent information TODO: this should also be all agents in detection range
         nearest_agent_space = spaces.Box(
             low=np.array([0, -1, -1], dtype=np.float32),  # [distance, dx, dy]
             high=np.array([self.size, 1, 1], dtype=np.float32),
@@ -127,7 +128,7 @@ class Explore(ExploreBaseParallelEnv):
             dtype=np.float32
         )
         
-        # 6. Grid exploration status (percentage explored)
+        # 6. Grid exploration status (percentage explored) TODO: this isnt really neccesary anymore
         grid_status_space = spaces.Box(
             low=0, 
             high=1,
@@ -241,7 +242,7 @@ class Explore(ExploreBaseParallelEnv):
                             # If this cell was unexplored before
                             if self.explored_area[nx, ny, 0] == 0:
                                 newly_explored += 1
-                                # We'll mark it as explored in the step function
+                                # Mark it as explored in the step function
                 
                 # Reward based on newly explored cells
                 exploration_reward = newly_explored * 1.0  # 1.0 per newly explored cell
@@ -298,8 +299,6 @@ class Explore(ExploreBaseParallelEnv):
 
             x, y, z = np.floor(pos).astype(int)
 
-            # TODO: check collision with obstacles (efficiently)
-
             if (pos < 0).any() or (pos > self.size).any():
                 self.terminated[agent] = True
 
@@ -311,12 +310,13 @@ class Explore(ExploreBaseParallelEnv):
                         break
 
             # **Collision with obstacles (fixing issue)**
-            for obstacle in self.obstacles:
+            for i, obstacle in enumerate(self.obstacles):
                 ox, oy, oz = obstacle  # Extract obstacle position
-                size = 0.5 + CLOSENESS_THRESHOLD # The size of the cube obstacles
-
+                obstacle_size = 0.5 * self.obstacle_sizes[i]
+                
                 # Check if the agent is inside the obstacle cube
-                if (ox - size <= x <= ox + size) and (oy - size <= y <= oy + size): # and (oz - size <= z <= oz + size):
+                if (ox - obstacle_size <= pos[0] <= ox + obstacle_size and
+                    oy - obstacle_size <= pos[1] <= oy + obstacle_size):
                     self.terminated[agent] = True
                     # print(f"{agent} terminated: collision with an obstacle at {obstacle}, agent location: {self._agent_location[agent]}")
                     break  # Stop checking if termination is detected
@@ -324,25 +324,28 @@ class Explore(ExploreBaseParallelEnv):
         return self.terminated
 
     def _compute_truncation(self):
+        # Check if all agents are terminated
         if all(self.terminated.values()):
-            print("\n=== ALL AGENTS TERMINATED ===")
-            print(f"Simulation ended at timestep {self.timestep}")
             truncation = {agent: True for agent in self._agents_names}
-            self.agents = []  # Empty the agents list to end the simulation
             
-            # Print stats
-            print(f"Total steps taken: {self.timestep}")
-            for agent in self._agents_names:
-                pos = self._agent_location[agent]
-                print(f"{agent} final position: {pos}")
-                
+            # Only print if in human render mode to avoid flooding logs during training
+            if self.render_mode == "human":
+                print("\n=== ALL AGENTS TERMINATED ===")
+                print(f"Simulation ended at timestep {self.timestep}")
+                print(f"Total steps taken: {self.timestep}")
+                for agent in self._agents_names:
+                    pos = self._agent_location[agent]
+                    print(f"{agent} final position: {pos}")
+                    
             return truncation
 
         # Check if we've reached max timesteps
-        if self.timestep == self.max_timesteps:
+        if self.timestep >= self.max_timesteps:  # Use >= instead of == to be safer
             truncation = {agent: True for agent in self._agents_names}
-            self.agents = []
-            print("Simulation truncated: reached maximum timesteps")
+            
+            if self.render_mode == "human":
+                print("Simulation truncated: reached maximum timesteps")
+                
             return truncation
         
         # Check if all grid cells have been visited
@@ -362,29 +365,33 @@ class Explore(ExploreBaseParallelEnv):
                 if not self.hgrid.grid_visited.get(i, False):
                     all_visited = False
                     break
+            
+            if not all_visited:
+                break  # Exit early once we know not everything is visited
         
         if all_visited:
-            print("\n=== EXPLORATION COMPLETE ===")
-            print("All grid cells have been visited!")
             truncation = {agent: True for agent in self._agents_names}
-            self.agents = []
             
-            # Print final stats
-            coarse_visited = sum(1 for i in range(self.hgrid.grid1_count) if self.hgrid.grid_visited.get(i, False))
-            fine_visited = sum(1 for i in range(self.hgrid.grid1_count, self.hgrid.total_grid_count) 
-                              if self.hgrid.grid_visited.get(i, False))
-            
-            print(f"Coarse cells visited: {coarse_visited}/{self.hgrid.grid1_count}")
-            print(f"Fine cells visited: {fine_visited}/{self.hgrid.total_grid_count - self.hgrid.grid1_count}")
-            print(f"Total steps taken: {self.timestep}")
-            
-            # For each agent, print stats
-            for agent in self._agents_names:
-                pos = self._agent_location[agent]
-                print(f"{agent} final position: {pos}")
+            if self.render_mode == "human":
+                print("\n=== EXPLORATION COMPLETE ===")
+                print("All grid cells have been visited!")
+                
+                # Print final stats
+                coarse_visited = sum(1 for i in range(self.hgrid.grid1_count) if self.hgrid.grid_visited.get(i, False))
+                fine_visited = sum(1 for i in range(self.hgrid.grid1_count, self.hgrid.total_grid_count) 
+                                  if self.hgrid.grid_visited.get(i, False))
+                
+                print(f"Coarse cells visited: {coarse_visited}/{self.hgrid.grid1_count}")
+                print(f"Fine cells visited: {fine_visited}/{self.hgrid.total_grid_count - self.hgrid.grid1_count}")
+                print(f"Total steps taken: {self.timestep}")
+                
+                # For each agent, print stats
+                for agent in self._agents_names:
+                    pos = self._agent_location[agent]
+                    print(f"{agent} final position: {pos}")
             
             return truncation
-            
+                
         # If not all cells are visited and we haven't reached max timesteps, continue
         return {agent: False for agent in self._agents_names}
 
@@ -431,13 +438,25 @@ class Explore(ExploreBaseParallelEnv):
     def _generate_random_obstacles(self):
         obstacle_map = np.zeros((self.size, self.size, self.size), dtype=int)
         self.obstacles = []
+        self.obstacle_sizes = []
+
         for _ in range(self.num_obstacles):
-            
             rand_x = np.random.randint(2, self.size - 2)
             rand_y = np.random.randint(2, self.size - 2)
-            z = 0
-            obstacle_map[rand_x, rand_y, z] = 1
-            self.obstacles.append((rand_x, rand_y, z))
+            # Random size variation
+            size_variation = np.random.uniform(1, 3)
+            
+            # Set z to a negative value to ensure obstacles are well below agents
+            # Agents fly at z=1.0, so setting obstacles at z=-0.5 will make agents more visible
+            z = -0.5
+            
+            obstacle = (rand_x, rand_y, z)
+            self.obstacles.append(obstacle)
+            self.obstacle_sizes.append(size_variation)
+
+            x_idx = min(int(rand_x), self.size - 1)
+            y_idx = min(int(rand_y), self.size - 1)
+            obstacle_map[x_idx, y_idx, 0] = 1
         return obstacle_map
 
     def _transition_state(self, actions):
@@ -545,7 +564,8 @@ class Explore(ExploreBaseParallelEnv):
                 
                 # Agent is close to target or the grid has been visited
                 # Check specifically if the grid is in a subdivided cell
-                if distance < 2.0 or self.hgrid.grid_visited.get(target_grid, False):
+                # TODO: use the is_at_center function
+                if distance < .2 or self.hgrid.grid_visited.get(target_grid, False):
                     need_assignment.add(agent)
                     # Clear current target
                     self.agent_targets[agent] = None

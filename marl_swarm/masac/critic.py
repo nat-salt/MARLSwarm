@@ -43,6 +43,9 @@ class SACCritic(nn.Module):
                     nn.init.zeros_(m.bias)
     
     def forward(self, global_state: torch.Tensor, joint_actions: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        if len(joint_actions.shape) == 3:
+            batch_size, num_agents, action_dim = joint_actions.shape
+            joint_actions = joint_actions.reshape(batch_size, num_agents * action_dim)
         x = torch.cat([global_state, joint_actions], dim=1)
 
         q1_values = self.q1(x)
@@ -55,5 +58,9 @@ class SACCritic(nn.Module):
         return torch.min(q1, q2)
     
     def q1_values(self, global_state: torch.Tensor, joint_actions: torch.Tensor) -> torch.Tensor:
+        if len(joint_actions.shape) == 3:
+            batch_size, num_agents, action_dim = joint_actions.shape
+            joint_actions = joint_actions.reshape(batch_size, num_agents * action_dim)
+            
         x = torch.cat([global_state, joint_actions], dim=1)
         return self.q1(x)

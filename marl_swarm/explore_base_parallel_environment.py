@@ -6,6 +6,8 @@ from typing import Dict, Optional
 from typing_extensions import override
 
 import numpy as np
+from os import environ
+environ['PYGAME_HIDE_SUPPORT_PROMPT'] = '1'
 import pygame
 from cflib.crazyflie.swarm import Swarm
 from gymnasium import spaces
@@ -355,21 +357,11 @@ class ExploreBaseParallelEnv(ParallelEnv):
         field(self.size)
         axes()
 
-        for obstacle in self.obstacles:
+        for i, obstacle in enumerate(self.obstacles):
             glPushMatrix()
-            box_obstacle(obstacle, 1)
+            size = self.obstacle_sizes[i] if hasattr(self, 'obstacle_sizes') else 1.0
+            box_obstacle(obstacle, size)
             glPopMatrix()
-
-        # pts1, pts2 = self.hgrid.getGridMarker()
-
-        # glColor3f(1.0, 0.0, 0.0)
-
-        # # Draw the grid lines
-        # glBegin(GL_LINES)
-        # for pt1, pt2 in zip(pts1, pts2):
-        #     glVertex3f(pt1[0], pt1[1], pt1[2])
-        #     glVertex3f(pt2[0], pt2[1], pt2[2])
-        # glEnd()
 
         # Draw the grid lines from HGrid
         if hasattr(self, "hgrid"):
@@ -387,7 +379,6 @@ class ExploreBaseParallelEnv(ParallelEnv):
             
             # Draw fine grid lines, but only for coarse cells that have been subdivided
             if len(pts1) > coarse_count and hasattr(self.hgrid, "subdivided_cells"):
-                print(f"THE CELL HAS BEEN SUBDIVIDED")
                 glColor3f(1.0, 0.5, 0.5)  # Light red for fine grid
                 glLineWidth(1.0)
                 glBegin(GL_LINES)
@@ -422,8 +413,19 @@ class ExploreBaseParallelEnv(ParallelEnv):
 
     @override
     def state(self):
-        states = tuple(self._compute_obs()[agent].astype(np.float32) for agent in self.possible_agents)
-        return np.concatenate(states, axis=None)
+        all_obs = self._compute_obs()
+        flattened_states = []
+
+        for agent in self.possible_agents:
+            agent_obs = all_obs[agent]
+            flat_components = []
+            for key, value in agent_obs.items():
+                flat_components.append(value.flatten())
+            
+            agent_flat_obs = np.concatenate(flat_components).astype(np.float32)
+            flattened_states.append(agent_flat_obs)
+
+        return np.concatenate(flattened_states)
 
     @override
     def close(self):

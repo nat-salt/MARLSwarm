@@ -33,7 +33,7 @@ class MASACAgent:
         batch_size: int = 256,
         initial_random_steps: int = 10000,
         target_update_interval: int = 1,
-        device: str = "auto",
+        device: str = "cpu",
     ):
         """
         Initialize the MASAC agent.
@@ -51,7 +51,7 @@ class MASACAgent:
             batch_size: Mini-batch size for training
             initial_random_steps: Number of initial random actions for exploration
             target_update_interval: Frequency of target network updates
-            device: Device for torch tensors ("auto", "cuda", or "cpu")
+            device: Device for torch tensors ("cuda", or "cpu")
         """
         self.env = env
         self.num_agents = len(env.possible_agents)
@@ -63,10 +63,8 @@ class MASACAgent:
         self.update_step = 0
         
         # Determine device to use
-        if device == "auto":
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        else:
-            self.device = torch.device(device)
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
             
         print(f"MASAC agent using device: {self.device}")
         
@@ -228,12 +226,6 @@ class MASACAgent:
     def update_parameters(self, updates: int = 1) -> Dict[str, float]:
         """
         Update actor and critic parameters.
-        
-        Args:
-            updates: Number of update iterations
-            
-        Returns:
-            Dictionary of training metrics
         """
         metrics = {
             'actor_loss': 0.0,
@@ -252,10 +244,22 @@ class MASACAgent:
                 self.batch_size
             )
             
-            # Update critic
+            # Add debug prints to check shapes
+            # print(f"joint_actions shape: {joint_actions.shape}")
+            
+            # Reshape joint_actions if it's 3D
+            orig_shape = joint_actions.shape
+            if len(joint_actions.shape) == 3:
+                # Reshape from [batch_size, num_agents, action_dim] to [batch_size, num_agents*action_dim]
+                batch_size, num_agents, action_dim = joint_actions.shape
+                joint_actions_flat = joint_actions.reshape(batch_size, num_agents * action_dim)
+            else:
+                joint_actions_flat = joint_actions
+                
+            # Update critic using flattened joint actions
             with torch.no_grad():
                 # Get next actions and log probs for each agent
-                next_joint_actions = []
+                next_actions_list = []
                 next_log_probs = []
                 
                 for i in range(self.num_agents):
@@ -264,11 +268,11 @@ class MASACAgent:
                         next_local_obs[:, i], 
                         agent_ids
                     )
-                    next_joint_actions.append(next_actions)
+                    next_actions_list.append(next_actions)
                     next_log_probs.append(next_log_prob)
                 
                 # Combine actions into joint action vector
-                next_joint_actions = torch.cat(next_joint_actions, dim=1)
+                next_joint_actions = torch.cat(next_actions_list, dim=1)
                 next_log_probs = torch.cat(next_log_probs, dim=1)
                 
                 # Calculate target Q-value 
@@ -282,8 +286,8 @@ class MASACAgent:
                 # Calculate target value
                 target_q = rewards + (1 - dones) * self.gamma * q_next
             
-            # Current Q-values
-            current_q1, current_q2 = self.critic(global_states, joint_actions)
+            # Current Q-values - use flattened joint_actions
+            current_q1, current_q2 = self.critic(global_states, joint_actions_flat)
             
             # Calculate critic loss (MSE)
             critic_loss = F.mse_loss(current_q1, target_q) + F.mse_loss(current_q2, target_q)
@@ -311,9 +315,14 @@ class MASACAgent:
                 new_actions, log_probs, _ = self.actors[i].sample_action(agent_obs, agent_ids)
                 
                 # Create joint action by combining actions
-                combined_actions = joint_actions.clone()
+                # Use the flattened version for consistency
+                combined_actions = joint_actions_flat.clone()
                 action_dim = new_actions.shape[1]
-                combined_actions[:, i*action_dim:(i+1)*action_dim] = new_actions
+                
+                # Replace the appropriate section in the flattened tensor
+                start_idx = i * action_dim
+                end_idx = (i + 1) * action_dim
+                combined_actions[:, start_idx:end_idx] = new_actions
                 
                 # Q-value from critic for this agent
                 q_values = self.critic.q1_values(global_states, combined_actions)[:, i:i+1]
@@ -328,6 +337,7 @@ class MASACAgent:
                 total_actor_loss += actor_loss.item()
                 total_entropy += -log_probs.mean().item()
             
+            # Rest of the method remains unchanged
             metrics['actor_loss'] += total_actor_loss / self.num_agents
             metrics['entropy'] += total_entropy / self.num_agents
             
