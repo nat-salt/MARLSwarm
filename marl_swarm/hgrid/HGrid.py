@@ -493,10 +493,11 @@ class HGrid:
             cost_matrix = np.vstack((cost_matrix, row_padding))
 
         assignments = hungarian_algorithm(cost_matrix)
+        # print(assignments)
 
         new_assignments = {}
         for agent_idx, grid_idx in assignments:
-            if grid_idx < len(grid_list):
+            if agent_idx < len(agents) and grid_idx < len(grid_list):
                 agent_id = agents[agent_idx]
                 grid_id = grid_list[grid_idx]
 
