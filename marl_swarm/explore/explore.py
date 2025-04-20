@@ -1,9 +1,12 @@
 import random
+import logging
 
 import numpy as np
 from gymnasium import spaces
 from marl_swarm import ExploreBaseParallelEnv, CLOSENESS_THRESHOLD
 from marl_swarm.hgrid import HGrid
+
+DETECTION_RANGE = 5.0
 
 class Explore(ExploreBaseParallelEnv):
     metadata = {"render_modes": ["human"], "name": "explore_v0", "is_parallelizable": True, "render_fps": 20}
@@ -17,12 +20,14 @@ class Explore(ExploreBaseParallelEnv):
             num_obstacles: int,
             render_mode=None,
     ):
-        print("changes made have had an effect")
-        self.max_timesteps = 800
+        self.max_timesteps = 500
 
         self.num_drones = num_drones
         self.threshold = threshold
         self.drone_ids = drone_ids
+
+        self.detection_range = DETECTION_RANGE
+        self.num_beams = 36
 
         self._agent_location = dict()
         self._init_flying_pos = dict()
@@ -33,7 +38,7 @@ class Explore(ExploreBaseParallelEnv):
         self.num_obstacles = num_obstacles
 
         for i, agent in enumerate(self._agents_names):
-            self._init_flying_pos[agent] = np.random.rand(3) * size  # Random initial positions
+            self._init_flying_pos[agent] = np.random.rand(3) * size  
 
         self._agent_location = self._init_flying_pos.copy()
 
@@ -45,38 +50,12 @@ class Explore(ExploreBaseParallelEnv):
             render_mode=render_mode,
         )
 
-    # TODO: GET THE FUCK RID OF IT
-    def get_target_actions(self):
-        """
-        Generate actions that move agents toward their assigned grid targets
-        ONLY USED FOR TESTING CORRECT HGRID IMPLEMENTATION
-        """
-        actions = {}
-        for agent in self.agents:
-            # Check if agent has a valid target
-            if agent in self.agent_targets and self.agent_targets[agent] is not None:
-                current_pos = self._agent_location[agent]
-                target_pos = self.agent_targets[agent]
-                
-                # Calculate direction vector to target
-                direction = target_pos - current_pos
-                
-                # Normalize and scale the direction (x,y components only)
-                direction_xy = direction[:2]  # Only x,y components
-                distance = np.linalg.norm(direction_xy)
-                
-                if distance > 0.1:  # Only move if not very close already
-                    # Normalize direction vector and use as action
-                    # Scale by 0.5 for smoother movement
-                    normalized_direction = direction_xy / distance * 0.5
-                    actions[agent] = np.clip(normalized_direction, -1, 0.1)
-                else:
-                    # Very close to target, stop moving
-                    actions[agent] = np.zeros(2)
-            else:
-                # No target assigned or target is None, don't move
-                actions[agent] = np.zeros(2)
-        return actions
+        # set up a module‐level logger
+        self.logger = logging.getLogger(self.metadata["name"])
+        if self.render_mode == "human":
+            self.logger.setLevel(logging.INFO)
+        else:
+            self.logger.setLevel(logging.WARNING)
 
     def _generate_random_positions(self, num_drones, size):
         positions = []
@@ -102,48 +81,20 @@ class Explore(ExploreBaseParallelEnv):
             shape=(3,),
             dtype=np.float32
         )
-        
-        # 3. Local exploration status (5x5 grid around the agent)
-        local_grid_size = 5
-        local_grid_space = spaces.Box(
-            low=0, 
-            high=1,
-            shape=(local_grid_size, local_grid_size), 
-            dtype=np.float32
-        )
-        
-        # 4. Nearest obstacle information (distance and direction) TODO: this should really be all obstacles in detection range
-        obstacle_space = spaces.Box(
-            low=np.array([0, -1, -1], dtype=np.float32),  # [distance, dx, dy]
-            high=np.array([self.size, 1, 1], dtype=np.float32),
-            shape=(3,),
-            dtype=np.float32
-        )
-        
-        # 5. Nearest agent information TODO: this should also be all agents in detection range
-        nearest_agent_space = spaces.Box(
-            low=np.array([0, -1, -1], dtype=np.float32),  # [distance, dx, dy]
-            high=np.array([self.size, 1, 1], dtype=np.float32),
-            shape=(3,),
-            dtype=np.float32
-        )
-        
-        # 6. Grid exploration status (percentage explored) TODO: this isnt really neccesary anymore
-        grid_status_space = spaces.Box(
-            low=0, 
-            high=1,
-            shape=(1,), 
-            dtype=np.float32
+
+        beam_obs = spaces.Box(
+            low=0.0,
+            high=self.detection_range,
+            shape=(self.num_beams,),
+            dtype=np.float32,
         )
         
         # Combine all spaces into a Dict space
         return spaces.Dict({
             "position": position_space,
             "grid_center_distance": grid_center_distance_space,
-            "local_map": local_grid_space,
-            "nearest_obstacle": obstacle_space,
-            "nearest_agent": nearest_agent_space,
-            "grid_explored": grid_status_space
+            "obstacle_scan": beam_obs,
+            "agent_scan": beam_obs
         })
 
     def _action_space(self, agent):
@@ -151,16 +102,19 @@ class Explore(ExploreBaseParallelEnv):
 
     def _compute_obs(self):
         obs = dict()
+
+        # Define padding values
+        padding_value_obstacle = np.array([self.detection_range, 0, 0], dtype=np.float32)
+        padding_value_agent = np.array([self.detection_range, 0, 0], dtype=np.float32)
+
         for agent in self._agents_names:
             if self.terminated[agent]:
                 # For terminated agents, provide a zero observation
                 obs[agent] = {
                     "position": np.zeros(3, dtype=np.float32),
                     "grid_center_distance": np.zeros(3, dtype=np.float32),
-                    "local_map": np.zeros((5, 5), dtype=np.float32),
-                    "nearest_obstacle": np.zeros(3, dtype=np.float32),
-                    "nearest_agent": np.zeros(3, dtype=np.float32),
-                    "grid_explored": np.array([0.0], dtype=np.float32)
+                    "obstacle_scan": np.zeros(self.num_beams, dtype=np.float32),
+                    "agent_scan":    np.zeros(self.num_beams, dtype=np.float32),
                 }
             else:
                 pos = self._agent_location[agent]
@@ -175,114 +129,73 @@ class Explore(ExploreBaseParallelEnv):
                 
                 # 3. Extract local exploration map (5x5 grid around agent)
                 local_map = self._get_local_map(pos, 5)
-                
-                # 4. Find nearest obstacle information
-                nearest_obstacle = self._get_nearest_obstacle_info(pos)
-                
-                # 5. Find nearest agent information
-                nearest_agent = self._get_nearest_agent_info(agent, pos)
-                
-                # 6. Get grid exploration status
-                grid_id = self.hgrid.position_to_grid_id(pos)
-                grid_explored = np.array([0.0], dtype=np.float32)
-                if grid_id >= 0:
-                    grid_explored = np.array([self.hgrid.grid_explored.get(grid_id, 0.0)], dtype=np.float32)
-                
-                
+
+                raw_obstacles = self._get_obstacles_in_range(pos)
+                obstacle_scan = self._scan(pos, raw_obstacles)
+
+                raw_agents = self._get_agents_in_range(agent, pos)
+                agent_scan = self._scan(pos, raw_agents)
+
                 # Combine all observations
                 obs[agent] = {
                     "position": position,
                     "grid_center_distance": grid_center_distance,
-                    "local_map": local_map,
-                    "nearest_obstacle": nearest_obstacle,
-                    "nearest_agent": nearest_agent,
-                    "grid_explored": grid_explored
+                    "obstacle_scan": obstacle_scan,
+                    "agent_scan": agent_scan,
                 }
         
         return obs
-
+    
     def _compute_reward(self):
         rewards = {}
-        exploration_radius = 0.5  # Adjust as needed
 
-        # Create a per-agent record of visited positions if not already present
+        # one‐time inits
         if not hasattr(self, "explored_points"):
-            self.explored_points = {agent: [] for agent in self._agent_location}
+            self.explored_points = {a: set() for a in self._agent_location}
+            self.termination_reward_given = {a: False for a in self._agent_location}
+        if not hasattr(self, "reached_target_reward_given"):
+            self.reached_target_reward_given = {a: False for a in self._agent_location}
 
-        # Create a flag to record if termination reward was given
-        if not hasattr(self, "termination_reward_given"):
-            self.termination_reward_given = {agent: False for agent in self._agent_location}
-
-        for agent in self._agent_location:
-            # If agent is terminated, give -100 penalty only once
+        for agent, pos in self._agent_location.items():
+            # 1) termination penalty
             if self.terminated[agent]:
                 if not self.termination_reward_given[agent]:
-                    rewards[agent] = -100.0  # Large penalty for termination
+                    rewards[agent] = -100.0
                     self.termination_reward_given[agent] = True
                 else:
-                    rewards[agent] = 0.0  # No additional penalty after first one
-            else:
-                pos = self._agent_location[agent]
-                
-                # Base reward starts at a small negative value (time penalty)
-                reward = -0.1
-                
-                # Reward for exploring new area
-                x, y, z = np.floor(pos).astype(int)
-                x = np.clip(x + self.size, 0, self.explored_area.shape[0] - 1)
-                y = np.clip(y + self.size, 0, self.explored_area.shape[1] - 1)
-                
-                # Check surrounding area for newly explored cells
-                newly_explored = 0
-                for dx in range(-1, 2):
-                    for dy in range(-1, 2):
-                        nx, ny = x + dx, y + dy
-                        if (0 <= nx < self.explored_area.shape[0] and 
-                            0 <= ny < self.explored_area.shape[1]):
-                            # If this cell was unexplored before
-                            if self.explored_area[nx, ny, 0] == 0:
-                                newly_explored += 1
-                                # Mark it as explored in the step function
-                
-                # Reward based on newly explored cells
-                exploration_reward = newly_explored * 1.0  # 1.0 per newly explored cell
-                reward += exploration_reward
-                
-                # Grid-based reward component
-                grid_id = self.hgrid.position_to_grid_id(pos)
-                if grid_id >= 0:
-                    # Get previously assigned grid for this agent
-                    assigned_grid = self.hgrid.get_agent_assignment(agent)
-                    
-                    # If agent is in its assigned grid
-                    if assigned_grid == grid_id:
-                        reward += 0.5  # Bonus for being in the assigned grid
-                        
-                        # Extra bonus for exploring currently assigned grid
-                        if exploration_reward > 0:
-                            reward += 0.5
-                            
-                    # Penalty for overlapping with another agent's assignment
-                    if grid_id != assigned_grid:
-                        for other_agent, other_grid in self.hgrid.agent_assignments.items():
-                            if other_agent != agent and other_grid == grid_id:
-                                reward -= 0.3  # Small penalty for exploring another agent's area
-                                break
-                
-                # Movement towards target
-                if agent in self.agent_targets and self.agent_targets[agent] is not None:
-                    target = self.agent_targets[agent]
-                    current_dist = np.linalg.norm(pos - target)
-                    
-                    # If agent had a previous position, calculate progress towards target
-                    if agent in self._previous_location:
-                        prev_pos = self._previous_location[agent]
-                        prev_dist = np.linalg.norm(prev_pos - target)
-                        progress = prev_dist - current_dist
-                        reward += progress * 0.5  # Small reward for moving towards target
-                
-                rewards[agent] = reward
-        
+                    rewards[agent] = 0.0
+                continue
+
+            # 2) small step penalty
+            reward = -0.1
+
+            # 3) exploration bonus
+            x, y, _ = np.floor(pos).astype(int)
+            cell = (x, y)
+            if 0 <= x < self.size and 0 <= y < self.size and cell not in self.explored_points[agent]:
+                reward += 1.0
+                self.explored_points[agent].add(cell)
+
+            # 4) small reward for moving closer to target
+            if (agent in self.agent_targets and
+                self.agent_targets[agent] is not None and
+                hasattr(self, "_previous_location")):
+                prev = self._previous_location[agent]
+                target = np.array(self.agent_targets[agent])
+                prev_dist = np.linalg.norm(prev[:2] - target[:2])
+                curr_dist = np.linalg.norm(pos[:2]  - target[:2])
+                progress = max(0.0, prev_dist - curr_dist)
+                reward += 0.1 * progress
+
+                # 5) big bonus once for reaching the target grid
+                if (prev_dist > CLOSENESS_THRESHOLD and
+                    curr_dist <= CLOSENESS_THRESHOLD and
+                    not self.reached_target_reward_given[agent]):
+                    reward += 50.0
+                    self.reached_target_reward_given[agent] = True
+
+            rewards[agent] = reward
+
         return rewards
 
     def _compute_terminated(self):
@@ -290,10 +203,6 @@ class Explore(ExploreBaseParallelEnv):
             # Skip already terminated agents
             if self.terminated[agent]:
                 continue
-
-            # Prevent termination within the first few timesteps - UNCOMMENT IF NEEDED
-            # if self.timestep < 10:
-            #     continue
 
             pos = self._agent_location[agent]
 
@@ -309,7 +218,6 @@ class Explore(ExploreBaseParallelEnv):
                         self.terminated[agent] = True
                         break
 
-            # **Collision with obstacles (fixing issue)**
             for i, obstacle in enumerate(self.obstacles):
                 ox, oy, oz = obstacle  # Extract obstacle position
                 obstacle_size = 0.5 * self.obstacle_sizes[i]
@@ -318,7 +226,6 @@ class Explore(ExploreBaseParallelEnv):
                 if (ox - obstacle_size <= pos[0] <= ox + obstacle_size and
                     oy - obstacle_size <= pos[1] <= oy + obstacle_size):
                     self.terminated[agent] = True
-                    # print(f"{agent} terminated: collision with an obstacle at {obstacle}, agent location: {self._agent_location[agent]}")
                     break  # Stop checking if termination is detected
 
         return self.terminated
@@ -411,7 +318,8 @@ class Explore(ExploreBaseParallelEnv):
         self.hgrid = HGrid(env_size=[self.size, self.size, self.size])
 
         # Initialize exploration memory
-        self.explored_points = {agent: [] for agent in self._agent_location}
+        # self.explored_points = {agent: [] for agent in self._agent_location}
+        self.explored_points = {agent: set() for agent in self._agent_location}
 
         # Track the last visited grid IDs for each agent
         self.last_grid_ids = []
@@ -430,7 +338,8 @@ class Explore(ExploreBaseParallelEnv):
                 if grid_center is not None:
                     self.agent_targets[agent] = grid_center
                     self.hgrid.assign_agent(agent, grid_id)
-                    print(f"Agent {agent} assigned initial grid {grid_id}")
+                    # only log in human‐render mode
+                    self.logger.info(f"Agent {agent} assigned initial grid {grid_id}")
 
 
         return self._compute_obs(), self._compute_info()
@@ -445,9 +354,6 @@ class Explore(ExploreBaseParallelEnv):
             rand_y = np.random.randint(2, self.size - 2)
             # Random size variation
             size_variation = np.random.uniform(1, 3)
-            
-            # Set z to a negative value to ensure obstacles are well below agents
-            # Agents fly at z=1.0, so setting obstacles at z=-0.5 will make agents more visible
             z = -0.5
             
             obstacle = (rand_x, rand_y, z)
@@ -507,13 +413,13 @@ class Explore(ExploreBaseParallelEnv):
                 if current_grid >= 0 and self.hgrid.is_at_center(agent_pos, current_grid):
                     if not self.hgrid.grid_visited.get(current_grid, False):
                         self.hgrid.mark_grid_visited(current_grid)
-                        
-                        # For fine grids, print more detailed information
                         if current_grid >= self.hgrid.grid1_count:
                             parent_id = self.hgrid.fine_to_coarse_id(current_grid)
-                            print(f"Agent {agent} has reached center of fine grid {current_grid} (parent: {parent_id})")
+                            self.logger.info(
+                                f"Agent {agent} reached center of fine grid {current_grid} (parent {parent_id})"
+                            )
                         else:
-                            print(f"Agent {agent} has reached center of coarse grid {current_grid}")
+                            self.logger.info(f"Agent {agent} reached center of coarse grid {current_grid})")
                             
                             # SUBDIVIDE WHEN A COARSE GRID CENTER IS REACHED
                             if current_grid not in self.hgrid.subdivided_cells:
@@ -551,19 +457,13 @@ class Explore(ExploreBaseParallelEnv):
             if current_grid >= 0:
                 current_assignments[agent] = current_grid
             
-            # An agent needs assignment if:
-            # 1. It has no target
-            # 2. It reached its target (or is very close)
-            # 3. Its currently assigned grid has been marked as visited
             if agent not in self.agent_targets or self.agent_targets[agent] is None:
                 need_assignment.add(agent)
             elif self.agent_targets[agent] is not None:
                 target_pos = self.agent_targets[agent]
                 target_grid = self.hgrid.position_to_grid_id(target_pos)
                 distance = np.linalg.norm(pos[:2] - target_pos[:2])
-                
-                # Agent is close to target or the grid has been visited
-                # Check specifically if the grid is in a subdivided cell
+
                 # TODO: use the is_at_center function
                 if distance < .2 or self.hgrid.grid_visited.get(target_grid, False):
                     need_assignment.add(agent)
@@ -573,7 +473,7 @@ class Explore(ExploreBaseParallelEnv):
             
         # Assign new targets where needed
         if need_assignment:
-            print(f"Agents needing assignment: {need_assignment}")
+            self.logger.info(f"Agents needing assignment: {need_assignment}")
             
             # Check if there are any fine grids in subdivided cells that need exploration first
             fine_grids = []
@@ -585,7 +485,7 @@ class Explore(ExploreBaseParallelEnv):
             
             # Prioritize assignment to fine grids if available
             if fine_grids and need_assignment:
-                print(f"Fine grids available for assignment: {fine_grids}")
+                self.logger.info(f"Fine grids available for assignment: {fine_grids}")
                 # Assign one agent to each fine grid
                 for agent in need_assignment:
                     if fine_grids:
@@ -606,7 +506,7 @@ class Explore(ExploreBaseParallelEnv):
                         if grid_center is not None:
                             self.agent_targets[agent] = grid_center
                             self.hgrid.assign_agent(agent, grid_id)
-                            print(f"Agent {agent} assigned new grid {grid_id}")
+                            self.logger.info(f"Agent {agent} assigned new grid {grid_id}")
         
         # Store current grid IDs for next iteration
         self.last_grid_ids = list(current_assignments.values())
@@ -636,7 +536,7 @@ class Explore(ExploreBaseParallelEnv):
 
         return observations, rewards, terminations, truncations, infos
     
-    def _get_local_map(self, position, size=5):
+    def _get_local_map(self, position, size=5):     #TODO: this function is very different in the suggested edits.
         """Extract a local occupancy grid around the agent's position"""
         x, y, z = np.floor(position).astype(int)
         half_size = size // 2
@@ -662,75 +562,112 @@ class Explore(ExploreBaseParallelEnv):
         
         return local_map
 
-    def _get_nearest_obstacle_info(self, position):
-        """Get information about the nearest obstacle"""
-        nearest_dist = float('inf')
-        nearest_dir = np.zeros(2)
+    def _scan(self, pos, detections):
+        scans = np.full(self.num_beams, self.detection_range, dtype=np.float32)
+        angles = np.linspace(-np.pi, np.pi, self.num_beams, endpoint=False)
+        for dist, dx, dy in detections:
+            angle = np.arctan2(dy, dx)
+            idx = int(((angle + np.pi) / (2*np.pi)) * self.num_beams) % self.num_beams
+            if dist < scans[idx]:
+                scans[idx] = dist
+        return scans
+    
+    def _get_obstacles_in_range(self, position):
+        detected_obstacles = []
+        pos_xy = position[:2]
 
-        for obstacle in self.obstacles:
+        for i, obstacle in enumerate(self.obstacles):
             obstacle_pos = np.array(obstacle)
-            diff = obstacle_pos - position
-            dist = np.linalg.norm(diff[:2])    # Only consider x, y distance
+            obstacle_pos_xy = obstacle_pos[:2]
+            diff_xy = obstacle_pos_xy - pos_xy
+            dist_xy = np.linalg.norm(diff_xy)
 
-            if dist < nearest_dist:
-                nearest_dist = dist
-                nearest_dir = diff[:2] / (dist + 1e-6)
+            if 0 < dist_xy < self.detection_range:
+                direction_xy = diff_xy / dist_xy
+                detected_obstacles.append(np.array([dist_xy, direction_xy[0], direction_xy[1]], dtype=np.float32))
+            
+        detected_obstacles.sort(key=lambda x: x[0])
+        return detected_obstacles
+    
+    def _get_agents_in_range(self, current_agent, position):
+        detected_agents = []
+        pos_xy = position[:2]
 
-        if nearest_dist == float('inf'):
-            return np.array([0, 0, 0], dtype=np.float32)
-        else:
-            return np.array([nearest_dist, nearest_dir[0], nearest_dir[1]], dtype=np.float32)
-
-    def _get_nearest_agent_info(self, agent, position):
-        """Find distance and direction to nearest other agent"""
-        nearest_dist = float('inf')
-        nearest_dir = np.zeros(2)
-        
-        for other_agent, other_pos in self._agent_location.items():
-            if other_agent == agent or self.terminated[other_agent]:
+        for other_agent, other_position in self._agent_location.items():
+            if other_agent == current_agent or self.terminated.get(other_agent, False):
                 continue
-                
-            diff = other_pos - position
-            dist = np.linalg.norm(diff[:2])
 
-            if dist < nearest_dist:
-                nearest_dist = dist
-                nearest_dir = diff[:2] / (dist + 1e-6)
-        
-        if nearest_dist == float('inf'):
-            return np.array([0, 0, 0], dtype=np.float32)
-        else:
-            return np.array([nearest_dist, nearest_dir[0], nearest_dir[1]], dtype=np.float32)
+            other_pos_xy = other_position[:2]
+            diff_xy = other_pos_xy - pos_xy
+            dist_xy = np.linalg.norm(diff_xy)
+
+            if 0 < dist_xy < self.detection_range:
+                direction_xy = diff_xy / dist_xy
+                detected_agents.append(np.array([dist_xy, direction_xy[0], direction_xy[1]], dtype=np.float32))
+
+        detected_agents.sort(key=lambda x: x[0])
+        return detected_agents
 
     def _get_grid_exploration_status(self, grid_id):
-        """Calculate what percentage of this grid cell has been explored"""
+        """Calculate what percentage of this grid cell has been explored (used internally)."""
+        # ... (Keep the existing implementation of this method) ...
         if grid_id < 0:
             return 0.0
-        
+
         # Get grid center and approximate bounds
         grid_center = self.hgrid.get_center(grid_id)
         if grid_center is None:
-            return 0.0
-        
-        # Determine if is is a coarse or fine grid
+            # print(f"Warning: Could not get center for grid_id {grid_id} in _get_grid_exploration_status")
+            return 0.0 # Cannot calculate if center is unknown
+
+        # Determine if it is a coarse or fine grid
         is_coarse = grid_id < self.hgrid.grid1_count
+        env_size_xy = [self.size, self.size] # Use only XY for exploration area check
 
-        # Calculate cell size based on division level
-        env_size = [self.size, self.size, self.size]
+        # Calculate cell size based on division level (using XY)
         if is_coarse:
-            cell_size = [env_size[i] / self.hgrid.level1_divisions[i] for i in range(3)]
+            level1_div_xy = self.hgrid.level1_divisions[:2]
+            cell_size_xy = [env_size_xy[i] / level1_div_xy[i] for i in range(2)]
         else:
-            cell_size = [env_size[i] / self.hgrid.level2_divisions[i] for i in range(3)]
+            # Need parent coarse grid to find fine divisions
+            parent_id = self.hgrid.fine_to_coarse_id(grid_id)
+            # guard against invalid parent indices
+            if parent_id is None \
+               or parent_id < 0 \
+               or parent_id >= len(self.hgrid.level2_divisions):
+                self.logger.warning(
+                    f"Invalid parent_id {parent_id} for fine grid {grid_id}"
+                )
+                return 0.0
+            # Get the 2D divisions for this parent coarse cell
+            level2_div = self.hgrid.level2_divisions[parent_id]
+            level2_div_xy = level2_div[:2]
+            # Calculate coarse‐cell size first
+            level1_div_xy = self.hgrid.level1_divisions[:2]
+            parent_cell_size_xy = [
+                env_size_xy[i] / level1_div_xy[i] for i in range(2)
+            ]
+            # Fine cell size is parent size divided by fine divisions
+            cell_size_xy = [
+                parent_cell_size_xy[i] / level2_div_xy[i] for i in range(2)
+            ]
 
-        # Calculate grid bounds
-        min_x = max(0, int(grid_center[0] - cell_size[0]/2))
-        max_x = min(self.size-1, int(grid_center[0] + cell_size[0]/2))
-        min_y = max(0, int(grid_center[1] - cell_size[1]/2))
-        max_y = min(self.size-1, int(grid_center[1] + cell_size[1]/2))
+        grid_center_xy = np.array(grid_center)[:2]
+        min_x = max(0, int(np.floor(grid_center_xy[0] - cell_size_xy[0]/2)))
+        max_x = min(self.size - 1, int(np.floor(grid_center_xy[0] + cell_size_xy[0]/2)))
+        min_y = max(0, int(np.floor(grid_center_xy[1] - cell_size_xy[1]/2)))
+        max_y = min(self.size - 1, int(np.floor(grid_center_xy[1] + cell_size_xy[1]/2)))
 
-        # Count explored cells within the grid
-        explored_count = np.sum(self.explored_area[min_x:max_x+1, min_y:max_y+1, 0])
-        total_cells = (max_x - min_x + 1) * (max_y - min_y + 1)
+
+        # Ensure bounds are valid (min <= max)
+        if min_x > max_x or min_y > max_y:
+            total_cells = 0
+            explored_count = 0
+        else:
+             # Count explored cells within the grid bounds (using the 2D slice)
+            explored_count = np.sum(self.explored_area[min_x : max_x + 1, min_y : max_y + 1, 0])
+            total_cells = (max_x - min_x + 1) * (max_y - min_y + 1)
+
 
         # Return exploration percentage
         if total_cells > 0:
@@ -740,3 +677,33 @@ class Explore(ExploreBaseParallelEnv):
 
     def render(self):
         super().render()
+
+if __name__ == "__main__":
+
+    # Single‐agent example
+    drone_ids = np.array([0, 1])
+    env = Explore(
+        drone_ids=drone_ids,
+        size=10,
+        num_drones=2,
+        threshold=0.1,
+        num_obstacles=3,
+        render_mode="human"
+    )
+
+    # Reset environment
+    observations, info = env.reset()
+    print("Initial observations:", observations)
+
+    # Sample a random action for each agent and step once
+    actions = {agent: env._action_space(agent).sample() for agent in env.agents}
+    observations, rewards, terminations, truncations, info = env.step(actions)
+
+    print("Next observations:", observations)
+    print("Rewards:", rewards)
+    print("Terminations:", terminations)
+    print("Truncations:", truncations)
+
+    env.render()
+    from time import sleep
+    sleep(5)
