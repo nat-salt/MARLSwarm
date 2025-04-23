@@ -1,2 +1,9 @@
 
 *.pyc
+/tests
+marl_swarm.egg-info/dependency_links.txt
+marl_swarm.egg-info/PKG-INFO
+marl_swarm.egg-info/SOURCES.txt
+marl_swarm.egg-info/top_level.txt
+results
+models
