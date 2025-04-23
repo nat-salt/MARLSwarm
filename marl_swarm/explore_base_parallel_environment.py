@@ -9,7 +9,7 @@ import numpy as np
 from os import environ
 environ['PYGAME_HIDE_SUPPORT_PROMPT'] = '1'
 import pygame
-from cflib.crazyflie.swarm import Swarm
+from cflib.crazyflie.swarm import Swarm # TODO: get rid of this if possible
 from gymnasium import spaces
 from OpenGL.GL import (
     GL_AMBIENT,
@@ -413,19 +413,21 @@ class ExploreBaseParallelEnv(ParallelEnv):
 
     @override
     def state(self):
-        all_obs = self._compute_obs()
-        flattened_states = []
+        # all_obs = self._compute_obs()
+        # flattened_states = []
 
-        for agent in self.possible_agents:
-            agent_obs = all_obs[agent]
-            flat_components = []
-            for key, value in agent_obs.items():
-                flat_components.append(value.flatten())
+        # for agent in self.possible_agents:
+        #     agent_obs = all_obs[agent]
+        #     flat_components = []
+        #     for key, value in agent_obs.items():
+        #         flat_components.append(value.flatten())
             
-            agent_flat_obs = np.concatenate(flat_components).astype(np.float32)
-            flattened_states.append(agent_flat_obs)
+        #     agent_flat_obs = np.concatenate(flat_components).astype(np.float32)
+        #     flattened_states.append(agent_flat_obs)
 
-        return np.concatenate(flattened_states)
+        # return np.concatenate(flattened_states)
+        states = tuple(self._compute_obs()[agent].astype(np.float32) for agent in self.possible_agents)
+        return np.concatenate(states, axis=None)
 
     @override
     def close(self):
