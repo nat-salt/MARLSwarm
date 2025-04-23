@@ -439,7 +439,7 @@ class HGrid:
         # Clear previous assignments for grids that have been visited
         for agent_id, grid_id in list(self.agent_assignments.items()):
             if self.grid_visited.get(grid_id, False):
-                print(f"Grid {grid_id} has been visited (center reached), clearing assignment")
+                # print(f"Grid {grid_id} has been visited (center reached), clearing assignment")
                 del self.agent_assignments[agent_id]
         
         # Get unvisited grids from both levels
@@ -447,14 +447,14 @@ class HGrid:
         
         # If all grids have been visited, prioritize grids with less coverage
         if not unvisited:
-            print("All grid centers visited, targeting less explored areas")
+            # print("All grid centers visited, targeting less explored areas")
             for grid_id in range(self.total_grid_count):
                 if self.grid_explored.get(grid_id, 0.0) < 0.95:
                     unvisited.append(grid_id)
         
         # If still no available grids, use any grid
         if not unvisited:
-            print("All grids highly explored, using any grid")
+            # print("All grids highly explored, using any grid")
             unvisited = list(range(self.total_grid_count))
 
         agents = list(agent_positions.keys())
