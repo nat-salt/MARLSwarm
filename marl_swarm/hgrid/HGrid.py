@@ -424,7 +424,7 @@ class HGrid:
                         # Clear the assignment so agent will be reassigned
                         del self.agent_assignments[agent_id]
                     
-                print(f"Cell {coarse_id} subdivided into {len(fine_ids)} fine cells")
+                # print(f"Cell {coarse_id} subdivided into {len(fine_ids)} fine cells")
                 return True
         return False
     
@@ -495,6 +495,7 @@ class HGrid:
         assignments = hungarian_algorithm(cost_matrix)
         # print(assignments)
 
+        # Build assignments only for real agents and real grids (ignore padding)
         new_assignments = {}
         for agent_idx, grid_idx in assignments:
             if agent_idx < len(agents) and grid_idx < len(grid_list):
@@ -503,6 +504,6 @@ class HGrid:
 
                 new_assignments[agent_id] = grid_id
                 self.agent_assignments[agent_id] = grid_id
-                print(f"Optimally assigned agent {agent_id} to grid {grid_id}")
+                # print(f"Optimally assigned agent {agent_id} to grid {grid_id}")
         
         return new_assignments
