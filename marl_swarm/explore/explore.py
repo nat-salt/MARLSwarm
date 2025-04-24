@@ -58,12 +58,38 @@ class Explore(ExploreBaseParallelEnv):
         else:
             self.logger.setLevel(logging.WARNING)
 
-    # # Override to return the flattened Box space for each agent
-    # def observation_space(self, agent):
-    #     # take the original Dict space and flatten it
-    #     orig = self._observation_space(agent)
-    #     # return flatten_space(orig)
-    #     return orig
+
+    def get_target_actions(self):
+        """
+        Generate actions that move agents toward their assigned grid targets
+        ONLY USED FOR TESTING CORRECT HGRID IMPLEMENTATION
+        """
+        actions = {}
+        for agent in self.agents:
+            # Check if agent has a valid target
+            if agent in self.agent_targets and self.agent_targets[agent] is not None:
+                current_pos = self._agent_location[agent]
+                target_pos = self.agent_targets[agent]
+                
+                # Calculate direction vector to target
+                direction = target_pos - current_pos
+                
+                # Normalize and scale the direction (x,y components only)
+                direction_xy = direction[:2]  # Only x,y components
+                distance = np.linalg.norm(direction_xy)
+                
+                if distance > 0.1:  # Only move if not very close already
+                    # Normalize direction vector and use as action
+                    # Scale by 0.5 for smoother movement
+                    normalized_direction = direction_xy / distance * 0.5
+                    actions[agent] = np.clip(normalized_direction, -1, 0.1)
+                else:
+                    # Very close to target, stop moving
+                    actions[agent] = np.zeros(2)
+            else:
+                # No target assigned or target is None, don't move
+                actions[agent] = np.zeros(2)
+        return actions
 
     def _generate_random_positions(self, num_drones, size):
         positions = []
@@ -92,8 +118,8 @@ class Explore(ExploreBaseParallelEnv):
         scan_high = np.full(beam, dr, dtype=np.float32)
 
         # concatenate into one flat vector
-        low  = np.concatenate([pos_low, grid_low, scan_low, scan_low])
-        high = np.concatenate([pos_high, grid_high, scan_high, scan_high])
+        low  = np.concatenate([pos_low, grid_low, scan_low])
+        high = np.concatenate([pos_high, grid_high, scan_high])
 
         return spaces.Box(
             low=low,
@@ -128,10 +154,12 @@ class Explore(ExploreBaseParallelEnv):
 
                 # scans
                 obstacle_scan = self._scan(pos, self._get_obstacles_in_range(pos))
-                agent_scan    = self._scan(pos, self._get_agents_in_range(agent, pos))
+                agent_scan = self._scan(pos, self._get_agents_in_range(agent, pos))
+
+                fused_scan = np.minimum(obstacle_scan, agent_scan)
 
                 # concatenate into flat vector
-                vec = np.concatenate([pos, grid_dist, obstacle_scan, agent_scan])
+                vec = np.concatenate([pos, grid_dist, fused_scan])
 
             obs[agent] = vec
         return obs
@@ -139,52 +167,92 @@ class Explore(ExploreBaseParallelEnv):
     def _compute_reward(self):
         rewards = {}
 
-        # one‐time inits
-        if not hasattr(self, "explored_points"):
-            self.explored_points = {a: set() for a in self._agent_location}
-            self.termination_reward_given = {a: False for a in self._agent_location}
-        if not hasattr(self, "reached_target_reward_given"):
-            self.reached_target_reward_given = {a: False for a in self._agent_location}
+        # --- Ensure these are initialized in reset() ---
+        # self.visited_cells = set()
+        # self.termination_reward_given = {a: False for a in self._agents_names}
+        # ---
+
+        # --- Reward/Penalty Magnitudes (CRITICAL TUNING PARAMETERS) ---
+        REWARD_COARSE_NEW = 1.0       # Base reward for first global visit to a coarse cell center
+        REWARD_FINE_NEW = 2.0         # Base reward for first global visit to a fine cell center
+        TARGET_REACHED_BONUS = 5.0    # Bonus for reaching the center of an *assigned, new* target cell
+        PENALTY_ALREADY_VISITED = -1.0 # Penalty for visiting center of an already globally visited cell
+        STEP_PENALTY = -0.01
+        TERMINATION_PENALTY = -100.0
+
+        # Safety Penalties
+        OBSTACLE_SAFETY_DIST = 0.5    # Distance threshold for obstacle penalty
+        AGENT_SAFETY_DIST = 0.5       # Distance threshold for agent penalty
+        PENALTY_OBSTACLE_CLOSE = -0.1 # Penalty per obstacle beam below safety distance
+        PENALTY_AGENT_CLOSE = -0.1    # Penalty per agent beam below safety distance
+        # ---
+
+        # --- Requires state from step() indicating which center (if any) was reached ---
+        # Assume step() populates: self.agent_reached_center_of = {agent: grid_id or None}
+        # Assume step() populates: self.current_observations = self._compute_obs() # Store obs used for actions
+        # ---
+
+        current_observations = self._compute_obs() # Recompute or use stored obs from step start
 
         for agent, pos in self._agent_location.items():
-            # 1) termination penalty
+            # 1) Termination Penalty (applied once)
             if self.terminated[agent]:
+                rewards[agent] = TERMINATION_PENALTY if not self.termination_reward_given[agent] else 0.0
                 if not self.termination_reward_given[agent]:
-                    rewards[agent] = -100.0
                     self.termination_reward_given[agent] = True
-                else:
-                    rewards[agent] = 0.0
                 continue
 
-            # 2) small step penalty
-            reward = -0.1
+            # Initialize reward for this step
+            reward = 0.0
 
-            # 3) exploration bonus
-            x, y, _ = np.floor(pos).astype(int)
-            cell = (x, y)
-            if 0 <= x < self.size and 0 <= y < self.size and cell not in self.explored_points[agent]:
-                reward += 1.0
-                self.explored_points[agent].add(cell)
+            # 2) Step Penalty
+            reward += STEP_PENALTY
 
-            # 4) small reward for moving closer to target
-            if (agent in self.agent_targets and
-                self.agent_targets[agent] is not None and
-                hasattr(self, "_previous_location")):
-                prev = self._previous_location[agent]
-                target = np.array(self.agent_targets[agent])
-                prev_dist = np.linalg.norm(prev[:2] - target[:2])
-                curr_dist = np.linalg.norm(pos[:2]  - target[:2])
-                progress = max(0.0, prev_dist - curr_dist)
-                reward += 5 * progress
-                # reward += 0.1 * progress
+            # 3) Safety Penalties (using scans from observation)
+            agent_obs = current_observations[agent]
+            # Observation structure: [pos(3), grid_dist(3), fused_scan(num_beams)]
+            fused_scan = agent_obs[6:] # Fused scan starts at index 6
 
-                # 5) big bonus once for reaching the target grid
-                if (prev_dist > CLOSENESS_THRESHOLD and
-                    curr_dist <= CLOSENESS_THRESHOLD and
-                    not self.reached_target_reward_given[agent]):
-                    reward += 50.0
-                    self.reached_target_reward_given[agent] = True
+            # Apply penalties based on the fused scan, potentially triggering both if thresholds differ
+            num_close_obstacles = np.sum(fused_scan < OBSTACLE_SAFETY_DIST)
+            reward += num_close_obstacles * PENALTY_OBSTACLE_CLOSE
 
+            num_close_agents = np.sum(fused_scan < AGENT_SAFETY_DIST)
+            reward += num_close_agents * PENALTY_AGENT_CLOSE
+
+            # 4) Exploration Reward/Penalty (triggered *only* at cell center visit)
+            #    Needs info from step() about which center was reached *this* step.
+            grid_id_reached = self.agent_reached_center_of.get(agent) # Get grid_id reached this step
+
+            if grid_id_reached is not None:
+                # Check if visited *before* this step's marking action
+                # Assumes self.visited_cells reflects state *before* current step's visits are added
+                is_globally_visited = grid_id_reached in self.visited_cells
+
+                if not is_globally_visited:
+                    # --- Positive Reward for New Discovery ---
+                    is_coarse = grid_id_reached < self.hgrid.grid1_count
+                    if is_coarse:
+                        reward += REWARD_COARSE_NEW
+                    else: # Fine cell
+                        reward += REWARD_FINE_NEW
+
+                    # --- Bonus for reaching assigned target (using grid_dist implicitly) ---
+                    # Check if the reached grid was the agent's assigned target
+                    agent_target_pos = self.agent_targets.get(agent)
+                    if agent_target_pos is not None:
+                        # Convert target position back to target grid ID
+                        target_grid_id = self.hgrid.position_to_grid_id(agent_target_pos)
+                        if target_grid_id == grid_id_reached:
+                            reward += TARGET_REACHED_BONUS
+                            # Optional: Mark target as reached for this agent if needed elsewhere
+                            # self.reached_target_reward_given[agent] = True # Needs init in reset
+
+                else:
+                    # --- Penalty for Redundant Visit ---
+                    reward += PENALTY_ALREADY_VISITED
+
+            # Assign final reward for this agent
             rewards[agent] = reward
 
         return rewards
@@ -311,6 +379,12 @@ class Explore(ExploreBaseParallelEnv):
         # Initialize exploration memory
         # self.explored_points = {agent: [] for agent in self._agent_location}
         self.explored_points = {agent: set() for agent in self._agent_location}
+        self.visited_cells = set()
+        self.agent_reached_center_of = {agent: None for agent in self._agents_names}
+
+        self.needs_reassign = {agent: False for agent in self._agents_names}
+
+        self.newly_visited_in_step = set()
 
         # Track the last visited grid IDs for each agent
         self.last_grid_ids = []
@@ -388,11 +462,13 @@ class Explore(ExploreBaseParallelEnv):
     def step(self, actions):
         self.timestep += 1
 
-        if not hasattr(self, "steps_at_target"):
-            self.steps_at_target = {agent: 0 for agent in self._agents_names}
+        # if not hasattr(self, "steps_at_target"):
+        #     self.steps_at_target = {agent: 0 for agent in self._agents_names}
         
         new_locations = self._transition_state(actions)
         self._previous_location = self._agent_location
+
+        self.agent_reached_center_of = {agent: None for agent in self._agents_names}
 
         # Define need_assignment set at the beginning of the method
         need_assignment = set()
@@ -401,148 +477,121 @@ class Explore(ExploreBaseParallelEnv):
         for agent in self._agent_location:
             if not self.terminated[agent]:
                 self._agent_location[agent] = new_locations[agent]
-
-        # Update exploration status for agents at grid centers
-        for agent in self._agent_location:
-            if self.terminated[agent]:
-                continue
-
-            agent_pos = self._agent_location[agent]
-            current_grid = self.hgrid.position_to_grid_id(agent_pos)
-
-            # --- NEW: subdivide coarse grid immediately upon entry ---
-            if (
-                current_grid is not None
-                and 0 <= current_grid < self.hgrid.grid1_count
-                and current_grid not in self.hgrid.subdivided_cells
-            ):
-                print(f"Subdividing coarse grid {current_grid} upon entry")
-                self.hgrid.subdivide_cell(current_grid)
-
-            # mark visited only when agent reaches the centre
-            if current_grid is not None and self.hgrid.is_at_center(agent_pos, current_grid):
-                if not self.hgrid.grid_visited.get(current_grid, False):
-                    self.hgrid.mark_grid_visited(current_grid)
-                    if current_grid >= self.hgrid.grid1_count:
-                        parent_id = self.hgrid.fine_to_coarse_id(current_grid)
-                        self.logger.info(
-                            f"Agent {agent} reached center of fine grid {current_grid} (parent {parent_id})"
-                        )
-                    else:
-                        self.logger.info(f"Agent {agent} reached center of coarse grid {current_grid}")
-                    # now clear target if it was this cell
-                    if (
-                        agent in self.agent_targets
-                        and self.agent_targets[agent] is not None
-                        and current_grid == self.hgrid.position_to_grid_id(self.agent_targets[agent])
-                    ):
-                        print(f"Agent {agent} has completed its target grid {current_grid}")
-                        self.agent_targets[agent] = None
-                        need_assignment.add(agent)
-
-        # Force reassignment for agents if their target grid was just subdivided
-        for agent in self._agents_names:
-            if not self.terminated[agent]:
-                if agent in self.agent_targets and self.agent_targets[agent] is not None:
-                    target_grid = self.hgrid.position_to_grid_id(self.agent_targets[agent])
-                    if target_grid is not None and target_grid < self.hgrid.grid1_count and target_grid in self.hgrid.subdivided_cells:
-                        # Clear target to force reassignment to fine grids
-                        self.agent_targets[agent] = None
-                        print(f"Clearing {agent}'s target due to grid {target_grid} being subdivided")
-                        need_assignment.add(agent)
-
-        # Create current grid assignments dict
-        current_assignments = {}
         
-        for agent in self._agents_names:
-            if self.terminated[agent]:
-                continue
-            
-            pos = self._agent_location[agent]
-            current_grid = self.hgrid.position_to_grid_id(pos)
-            
-            if current_grid >= 0:
-                current_assignments[agent] = current_grid
-            
-            if agent not in self.agent_targets or self.agent_targets[agent] is None:
-                need_assignment.add(agent)
-            elif self.agent_targets[agent] is not None:
-                target_pos = self.agent_targets[agent]
-                target_grid = self.hgrid.position_to_grid_id(target_pos)
-                distance = np.linalg.norm(pos[:2] - target_pos[:2])
+        self._on_entry()
 
-                # TODO: use the is_at_center function
-                if distance < .2 or self.hgrid.grid_visited.get(target_grid, False):
-                    if distance < self.threshold:
-                        self.hgrid.mark_grid_visited(target_grid)
+        current_assignments = {
+            a: self.hgrid.position_to_grid_id(self._agent_location[a])
+            for a in self._agents_names
+            if not self.terminated[a]
+        }
 
-                    need_assignment.add(agent)
-                    # Clear current target
-                    self.agent_targets[agent] = None
-                    print(f"Agent {agent} completed target or target grid is marked visited")
-            
-        # Assign new targets where needed
-        if need_assignment:
-            self.logger.info(f"Agents needing assignment: {need_assignment}")
-            
-            # Check if there are any fine grids in subdivided cells that need exploration first
-            fine_grids = []
-            if self.hgrid.subdivided_cells:
-                for coarse_id in self.hgrid.subdivided_cells:
-                    for fine_id in self.hgrid.coarse_to_fine_ids(coarse_id):
-                        if not self.hgrid.grid_visited.get(fine_id, False):
-                            fine_grids.append(fine_id)
-            
-            # Prioritize assignment to fine grids if available
-            if fine_grids and need_assignment:
-                self.logger.info(f"Fine grids available for assignment: {fine_grids}")
-                # Assign one agent to each fine grid
-                for agent in need_assignment:
-                    if fine_grids:
-                        grid_id = fine_grids.pop(0)
-                        grid_center = self.hgrid.get_center(grid_id)
-                        if grid_center is not None:
-                            self.agent_targets[agent] = grid_center
-                            self.hgrid.assign_agent(agent, grid_id)
-                            print(f"Agent {agent} assigned to fine grid {grid_id}")
-            
-            # For any remaining agents, use the standard assignment method
-            remaining_agents = [a for a in need_assignment if a not in self.agent_targets or self.agent_targets[a] is None]
-            if remaining_agents:
-                new_targets = self.hgrid.get_next_targets(self._agent_location, current_assignments)
-                for agent, grid_id in new_targets.items():
-                    if agent in remaining_agents and grid_id is not None:
-                        grid_center = self.hgrid.get_center(grid_id)
-                        if grid_center is not None:
-                            self.agent_targets[agent] = grid_center
-                            self.hgrid.assign_agent(agent, grid_id)
-                            self.logger.info(f"Agent {agent} assigned new grid {grid_id}")
+        agents_to_replan = [a for a, flag in self.needs_reassign.items() if flag]
+        print(agents_to_replan)
+        self._reassign_targets(agents_to_replan, current_assignments)
         
         # Store current grid IDs for next iteration
         self.last_grid_ids = list(current_assignments.values())
+
+        # debug: print the target grid‐cell for each agent at every step
+        target_cells = {
+            agent: (self.hgrid.position_to_grid_id(center)
+                    if center is not None else None)
+            for agent, center in self.agent_targets.items()
+        }
+        print(f"Step {self.timestep} target cells: {target_cells}")
 
         # Calculate intermediates needed for reward
         terminations = self._compute_terminated()
         truncations = self._compute_truncation()
         rewards = self._compute_reward()
-
         observations = self._compute_obs()
-
-        # raw_obs = self._compute_obs()
-        # # flatten using the original Dict space
-        # observations = {
-        #     agent: flatten(self._observation_space(agent), raw_obs[agent])
-        #     for agent in raw_obs
-        # }
-
         infos = self._compute_info()
 
         return observations, rewards, terminations, truncations, infos
+    
+    def _on_entry(self) -> None:
+        self.newly_visited_in_step.clear()
+
+        for agent, pos in self._agent_location.items():
+            if self.terminated[agent]:
+                continue
+
+            # get grid agent is in
+            grid_id = self.hgrid.position_to_grid_id(pos)
+
+            if grid_id is None:
+                continue
+
+            # is coarse grid or fine
+            if grid_id < self.hgrid.grid1_count:
+                if grid_id not in self.hgrid.subdivided_cells:
+                    # subdivide coarse grid
+                    self.hgrid.subdivide_cell(grid_id)
+                    self.needs_reassign[agent] = True
+    
+            elif grid_id >= self.hgrid.grid1_count and self.hgrid.is_at_center(pos, grid_id):
+                if not self.hgrid.grid_visited.get(grid_id, False):
+                    self.hgrid.mark_grid_visited(grid_id)
+                    self.agent_reached_center_of[agent] = grid_id
+                    self.visited_cells.add(grid_id)
+                    self.newly_visited_in_step.add(grid_id)
+
+                target = self.agent_targets.get(agent)
+                if target is not None and grid_id == self.hgrid.position_to_grid_id(target):
+                    self.needs_reassign[agent] = True
+
+            # else:
+            target = self.agent_targets.get(agent)
+            if target is None:
+                self.needs_reassign[agent] = True
+            else:
+                target_id = self.hgrid.position_to_grid_id(target)
+                if target_id is not None and self.hgrid.grid_visited.get(target_id, False):
+                    self.needs_reassign[agent] = True
+
+            # handle case where agent whose assigned target‐grid is now visited
+            # tgt = self.agent_targets.get(agent)
+            # if tgt is not None:
+            #     tgt_id = self.hgrid.position_to_grid_id(tgt)
+            #     if tgt_id is not None and self.hgrid.grid_visited.get(tgt_id, False):
+            #         print("here 0")
+            #         # self.agent_targets.pop(agent, None)
+            #         # to_reassign.add(agent)
+
+            # # handle case where agent has no target
+            # if agent not in self.agent_targets or self.agent_targets[agent] is None:
+            #     print("here 1")
+            #     # to_reassign.add(agent)
+            #     
+    def _reassign_targets(self, agents_to_replan: list, current_assignments: dict) -> None:
+        if not agents_to_replan:
+            return
+        
+        new_targets = self.hgrid.get_next_targets(self._agent_location, current_assignments)
+        print(new_targets)
+        for agent in agents_to_replan:
+            grid_id = new_targets.get(agent)
+            if grid_id is None:
+                continue
+            center = self.hgrid.get_center(grid_id)
+            if center is None:
+                continue
+            self.agent_targets[agent] = center
+            self.hgrid.assign_agent(agent, grid_id)
+            self.needs_reassign[agent] = False
+        # for agent, grid_id in new_targets.items():
+        #     if agent in need_assignment and grid_id is not None:
+        #         grid_center = self.hgrid.get_center(grid_id)
+        #         if grid_center is not None:
+        #             self.agent_targets[agent] = grid_center
+        #             self.hgrid.assign_agent(agent, grid_id)
+        #             # self.logger.info(f"Agent {agent} reassigned to grid {grid_id}")
 
     def _scan(self, pos, detections):
         scans = np.full(self.num_beams, self.detection_range, dtype=np.float32)
         angles = np.linspace(-np.pi, np.pi, self.num_beams, endpoint=False)
-        for dist, dx, dy in detections:
+        for dist, dx, dy in detections: # TODO: obstacles can be different sizes
             angle = np.arctan2(dy, dx)
             idx = int(((angle + np.pi) / (2*np.pi)) * self.num_beams) % self.num_beams
             if dist < scans[idx]:
@@ -604,9 +653,15 @@ if __name__ == "__main__":
     # Reset environment
     observations, info = env.reset()
     print("Initial observations:", observations)
+    print(f"Observation size: {env.observation_space(env.unwrapped.agents[0])}")
 
     # Sample a random action for each agent and step once
     actions = {agent: env._action_space(agent).sample() for agent in env.agents}
+    # print the assignment
+    # print the assignment
+    print("Current assignment:")
+    for agent, target in env.agent_targets.items():
+        print(f"  {agent} -> {target}")
     observations, rewards, terminations, truncations, info = env.step(actions)
 
     print("Next observations:", observations)

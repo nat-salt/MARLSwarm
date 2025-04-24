@@ -62,7 +62,7 @@ class HGrid:
         return dist < threshold
     
     def mark_grid_visited(self, grid_id):
-        """Mark a grid as having had its center visited"""
+        """Mark a grid as visited"""
         if 0 <= grid_id < self.total_grid_count:
             self.grid_visited[grid_id] = True
 
@@ -444,7 +444,25 @@ class HGrid:
         
         # Get unvisited grids from both levels
         unvisited = self.get_unexplored_grids()
-        
+
+        agents = list(agent_positions.keys())
+
+        # 1) pad with coarse cells if too few
+        if len(unvisited) < len(agents):
+            for cid in self.get_unexplored_grids(level=1):
+                if cid not in unvisited:
+                    unvisited.append(cid)
+                    if len(unvisited) == len(agents):
+                        break
+
+        # 2) if still too few, pad with any remaining grids
+        if len(unvisited) < len(agents):
+            for gid in range(self.total_grid_count):
+                if gid not in unvisited:
+                    unvisited.append(gid)
+                    if len(unvisited) == len(agents):
+                        break
+
         # If all grids have been visited, prioritize grids with less coverage
         if not unvisited:
             # print("All grid centers visited, targeting less explored areas")
@@ -481,7 +499,7 @@ class HGrid:
                     
                     reassignment_penalty = 0
                     if current_assignments.get(agent_id) == grid_id:
-                        reassignment_penalty = 5.0
+                        reassignment_penalty = 50.0
                     
                     cost_matrix[i, j] = dist - exploration_bonus + grid_level_factor + reassignment_penalty
         
@@ -493,7 +511,100 @@ class HGrid:
             cost_matrix = np.vstack((cost_matrix, row_padding))
 
         assignments = hungarian_algorithm(cost_matrix)
-        # print(assignments)
+        # print(f"Assignments: {assignments}")
+
+        # Build assignments only for real agents and real grids (ignore padding)
+        new_assignments = {}
+        for agent_idx, grid_idx in assignments:
+            if agent_idx < len(agents) and grid_idx < len(grid_list):
+                agent_id = agents[agent_idx]
+                grid_id = grid_list[grid_idx]
+
+                new_assignments[agent_id] = grid_id
+                self.agent_assignments[agent_id] = grid_id
+                # print(f"Optimally assigned agent {agent_id} to grid {grid_id}")
+        
+        return new_assignments
+
+    def get_next_targets(self, agent_positions, current_assignments=None):
+        """
+        High-level planning function for RL - determines optimal next targets for agents
+        """
+        if current_assignments is None:
+            current_assignments = {}
+
+        # Clear previous assignments for grids that have been visited
+        for agent_id, grid_id in list(self.agent_assignments.items()):
+            if self.grid_visited.get(grid_id, False):
+                # print(f"Grid {grid_id} has been visited (center reached), clearing assignment")
+                del self.agent_assignments[agent_id]
+        
+        # Get unvisited grids from both levels
+        unvisited = self.get_unexplored_grids()
+
+        agents     = list(agent_positions.keys())
+        grid_list  = list(unvisited)
+        n_agents   = len(agents)
+        n_grids    = len(grid_list)
+        large_cost = 1000000.0
+        cost_matrix = np.full((n_agents, n_grids), large_cost)
+
+        # repulsion strength: how much we reward “farther from others”
+        repulsion_weight = 2.0
+
+        for i, agent_id in enumerate(agents):
+            pos = agent_positions[agent_id]
+            for j, grid_id in enumerate(grid_list):
+                center = self.get_center(grid_id)
+                if center is None:
+                    continue
+
+                # 1) distance to this grid‐center
+                dist = np.linalg.norm(pos - center)
+
+                # 2) exploration bonus, level bias, reassign penalty (your existing code)…
+                exploration_factor = 1.0 - self.grid_explored.get(grid_id, 0.0)
+                exploration_bonus = exploration_factor * 2.0
+
+                grid_level_factor = 0
+                if grid_id >= self.grid1_count:
+                    parent = self.fine_to_coarse_id(grid_id)
+                    if parent in self.subdivided_cells:
+                        grid_level_factor = -1.0
+
+                reassign_penalty = 0
+                if current_assignments.get(agent_id) == grid_id:
+                    reassign_penalty = 50.0
+
+                # 3) repulsion: prefer centers far from *other* agents’ current positions
+                other_dists = [
+                    np.linalg.norm(center - agent_positions[other])
+                    for other in agents if other != agent_id
+                ]
+                if other_dists:
+                    min_other = min(other_dists)
+                else:
+                    min_other = 0.0
+                repulsion_bonus = repulsion_weight * min_other
+
+                # combine into final cost (note repulsion is subtracted to *lower* cost)
+                cost_matrix[i, j] = (
+                    dist
+                    - exploration_bonus
+                    + grid_level_factor
+                    + reassign_penalty
+                    - repulsion_bonus
+                )
+        # … then pad & run hungarian as before …
+        if len(agents) > len(grid_list):
+            column_padding = np.full((len(agents), len(agents) - len(grid_list)), large_cost)
+            cost_matrix = np.hstack((cost_matrix, column_padding))
+        elif len(grid_list) > len(agents):
+            row_padding = np.full((len(grid_list) - len(agents), cost_matrix.shape[1]), large_cost)
+            cost_matrix = np.vstack((cost_matrix, row_padding))
+
+        assignments = hungarian_algorithm(cost_matrix)
+        # print(f"Assignments: {assignments}")
 
         # Build assignments only for real agents and real grids (ignore padding)
         new_assignments = {}
