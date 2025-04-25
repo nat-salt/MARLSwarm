@@ -91,12 +91,18 @@ class Explore(ExploreBaseParallelEnv):
                 actions[agent] = np.zeros(2)
         return actions
 
-    def _generate_random_positions(self, num_drones, size):
+    def _random_agent_positions(self, num_drones, size):
         positions = []
-        for _ in range(num_drones):
-            pos = np.random.uniform(low=0, high=size, size=2)
-            pos = np.append(pos, 1.0)  # Ensure the z-coordinate is 1.0
-            positions.append(pos)
+        while len(positions) < num_drones:
+            xy = np.random.uniform(0, size, size=2)
+            collision = False
+            for (ox, oy, _), osz in zip(self.obstacles, self.obstacle_sizes):
+                half = osz * 0.5
+                if ox - half <= xy[0] <= ox + half and oy - half <= xy[1] <= oy + half:
+                    collision = True
+                    break
+            if not collision:
+                positions.append(np.array([xy[0], xy[1], 1.0], dtype=np.float32))
         return positions
 
     def _observation_space(self, agent):
@@ -139,8 +145,7 @@ class Explore(ExploreBaseParallelEnv):
                 vec = np.concatenate([
                     np.zeros(3, dtype=np.float32),          # position
                     np.zeros(3, dtype=np.float32),          # grid_center_distance
-                    np.zeros(self.num_beams, dtype=np.float32),  # obstacle_scan
-                    np.zeros(self.num_beams, dtype=np.float32),  # agent_scan
+                    np.zeros(self.num_beams, dtype=np.float32),  # scan
                 ])
             else:
                 pos = self._agent_location[agent].astype(np.float32)
@@ -367,11 +372,18 @@ class Explore(ExploreBaseParallelEnv):
     def reset(self, seed=None, options=None):
         self.timestep = 0
         self.agents = [f"agent_{i}" for i in range(self.num_drones)]
-        self._agent_location = {f"agent_{i}": pos for i, pos in enumerate(self._generate_random_positions(self.num_drones, self.size))}
-        self.explored_area = np.zeros((self.size, self.size, self.size))
+
+        # self.explored_area = np.zeros((self.size, self.size, self.size))
         self.terminated = {agent: False for agent in self._agents_names}
         self.termination_reward_given = {agent: False for agent in self._agent_location}
+
         self.obstacle_map = self._generate_random_obstacles()
+
+        # self._agent_location = {f"agent_{i}": pos for i, pos in enumerate(self._random_agent_positions(self.num_drones, self.size))}
+        spawn_positions = self._random_agent_positions(self.num_drones, self.size)
+        self._agent_location = {
+            agent: pos for agent, pos in zip(self._agents_names, spawn_positions)
+        }
 
         # Initialize hgrid with environment size
         self.hgrid = HGrid(env_size=[self.size, self.size, self.size])
@@ -602,16 +614,21 @@ class Explore(ExploreBaseParallelEnv):
         detected_obstacles = []
         pos_xy = position[:2]
 
-        for i, obstacle in enumerate(self.obstacles):
-            obstacle_pos = np.array(obstacle)
-            obstacle_pos_xy = obstacle_pos[:2]
+        for (ox, oy, _), osz in zip(self.obstacles, self.obstacle_sizes):
+            obstacle_pos_xy = np.array([ox, oy])
             diff_xy = obstacle_pos_xy - pos_xy
-            dist_xy = np.linalg.norm(diff_xy)
+            dist_center = np.linalg.norm(diff_xy)
+            half_size = osz * 0.5
 
-            if 0 < dist_xy < self.detection_range:
-                direction_xy = diff_xy / dist_xy
-                detected_obstacles.append(np.array([dist_xy, direction_xy[0], direction_xy[1]], dtype=np.float32))
-            
+            # distance to the surface, not the center
+            dist_surface = max(dist_center - half_size, 0.0)
+
+            if 0 < dist_surface < self.detection_range:
+                direction_xy = diff_xy / dist_center
+                detected_obstacles.append(
+                    np.array([dist_surface, direction_xy[0], direction_xy[1]], dtype=np.float32)
+                )
+
         detected_obstacles.sort(key=lambda x: x[0])
         return detected_obstacles
     
