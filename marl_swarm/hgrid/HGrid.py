@@ -550,7 +550,7 @@ class HGrid:
         cost_matrix = np.full((n_agents, n_grids), large_cost)
 
         # repulsion strength: how much we reward “farther from others”
-        repulsion_weight = 2.0
+        repulsion_weight = 20.0
 
         for i, agent_id in enumerate(agents):
             pos = agent_positions[agent_id]
