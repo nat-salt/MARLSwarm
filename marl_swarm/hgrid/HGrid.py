@@ -29,6 +29,7 @@ class HGrid:
         self.agent_assignments = {} # Map agent_id -> grid_id
 
         self.subdivided_cells = set()
+        self.unreachable_grids = set()
         
         # Initialize grids
         self._init_grids()
@@ -85,41 +86,42 @@ class HGrid:
         return False
     
     def get_unexplored_grids(self, level=None):
-        """Get list of unvisited grid IDs (optionally by level)"""
+        """Get list of unvisited (and reachable) grid IDs (optionally by level)"""
         unvisited = []
-        
-        # First prioritize fine grid cells in subdivided coarse cells
-        if level == 2 or level is None:
-            # Get level 2 unvisited grids in subdivided cells
+        U = self.unreachable_grids
+
+        # fine‐grids first
+        if level in (2, None):
             for i in range(self.grid1_count, self.total_grid_count):
+                if i in U:           continue
                 if not self.grid_visited.get(i, False):
-                    # Only include fine grids that are in subdivided cells
-                    coarse_id = self.fine_to_coarse_id(i)
-                    if coarse_id in self.subdivided_cells:
+                    c = self.fine_to_coarse_id(i)
+                    if c in self.subdivided_cells:
                         unvisited.append(i)
-        
-        # Then include coarse cells that aren't subdivided
-        if level == 1 or level is None:
+
+        # coarse next
+        if level in (1, None):
             # If we have fine grid unvisited cells, don't include coarse cells
             if not unvisited or level == 1:
                 for i in range(self.grid1_count):
+                    if i in U:       continue
                     if not self.grid_visited.get(i, False) and i not in self.subdivided_cells:
                         unvisited.append(i)
-        
+
         # If no unvisited grids found, fall back to exploration percentage
         if not unvisited:
             # First try fine grid cells that are less explored
             for i in range(self.grid1_count, self.total_grid_count):
-                coarse_id = self.fine_to_coarse_id(i)
-                if coarse_id in self.subdivided_cells and self.grid_explored.get(i, 0.0) < 0.95:
+                if i in U:       continue
+                c = self.fine_to_coarse_id(i)
+                if c in self.subdivided_cells and self.grid_explored.get(i,0.0)<0.95:
                     unvisited.append(i)
-            
             # Then try coarse cells that are less explored
             if not unvisited:
                 for i in range(self.grid1_count):
-                    if i not in self.subdivided_cells and self.grid_explored.get(i, 0.0) < 0.95:
+                    if i in U:       continue
+                    if i not in self.subdivided_cells and self.grid_explored.get(i,0.0)<0.95:
                         unvisited.append(i)
-        
         return unvisited
     
     def _calculate_grid_centers(self, divisions):
@@ -443,107 +445,10 @@ class HGrid:
                 del self.agent_assignments[agent_id]
         
         # Get unvisited grids from both levels
-        unvisited = self.get_unexplored_grids()
+        unvisited = [g for g in self.get_unexplored_grids() if g not in self.unreachable_grids]
 
-        agents = list(agent_positions.keys())
-
-        # 1) pad with coarse cells if too few
-        if len(unvisited) < len(agents):
-            for cid in self.get_unexplored_grids(level=1):
-                if cid not in unvisited:
-                    unvisited.append(cid)
-                    if len(unvisited) == len(agents):
-                        break
-
-        # 2) if still too few, pad with any remaining grids
-        if len(unvisited) < len(agents):
-            for gid in range(self.total_grid_count):
-                if gid not in unvisited:
-                    unvisited.append(gid)
-                    if len(unvisited) == len(agents):
-                        break
-
-        # If all grids have been visited, prioritize grids with less coverage
-        if not unvisited:
-            # print("All grid centers visited, targeting less explored areas")
-            for grid_id in range(self.total_grid_count):
-                if self.grid_explored.get(grid_id, 0.0) < 0.95:
-                    unvisited.append(grid_id)
-        
-        # If still no available grids, use any grid
-        if not unvisited:
-            # print("All grids highly explored, using any grid")
-            unvisited = list(range(self.total_grid_count))
-
-        agents = list(agent_positions.keys())
-        grid_list = list(unvisited)
-
-        large_cost = 1000000.0
-        cost_matrix = np.full((len(agents), len(grid_list)), large_cost)
-
-        for i, agent_id in enumerate(agents):
-            pos = agent_positions[agent_id]
-            for j, grid_id in enumerate(grid_list):
-                grid_center = self.get_center(grid_id)
-                if grid_center is not None:
-                    dist = np.linalg.norm(pos - grid_center)
-
-                    exploration_factor = 1.0 - self.grid_explored.get(grid_id, 0.0)
-                    exploration_bonus = exploration_factor * 2.0
-
-                    grid_level_factor = 0
-                    if grid_id >= self.grid1_count:
-                        parent_id = self.fine_to_coarse_id(grid_id)
-                        if parent_id in self.subdivided_cells:
-                            grid_level_factor = -1.0
-                    
-                    reassignment_penalty = 0
-                    if current_assignments.get(agent_id) == grid_id:
-                        reassignment_penalty = 50.0
-                    
-                    cost_matrix[i, j] = dist - exploration_bonus + grid_level_factor + reassignment_penalty
-        
-        if len(agents) > len(grid_list):
-            column_padding = np.full((len(agents), len(agents) - len(grid_list)), large_cost)
-            cost_matrix = np.hstack((cost_matrix, column_padding))
-        elif len(grid_list) > len(agents):
-            row_padding = np.full((len(grid_list) - len(agents), cost_matrix.shape[1]), large_cost)
-            cost_matrix = np.vstack((cost_matrix, row_padding))
-
-        assignments = hungarian_algorithm(cost_matrix)
-        # print(f"Assignments: {assignments}")
-
-        # Build assignments only for real agents and real grids (ignore padding)
-        new_assignments = {}
-        for agent_idx, grid_idx in assignments:
-            if agent_idx < len(agents) and grid_idx < len(grid_list):
-                agent_id = agents[agent_idx]
-                grid_id = grid_list[grid_idx]
-
-                new_assignments[agent_id] = grid_id
-                self.agent_assignments[agent_id] = grid_id
-                # print(f"Optimally assigned agent {agent_id} to grid {grid_id}")
-        
-        return new_assignments
-
-    def get_next_targets(self, agent_positions, current_assignments=None):
-        """
-        High-level planning function for RL - determines optimal next targets for agents
-        """
-        if current_assignments is None:
-            current_assignments = {}
-
-        # Clear previous assignments for grids that have been visited
-        for agent_id, grid_id in list(self.agent_assignments.items()):
-            if self.grid_visited.get(grid_id, False):
-                # print(f"Grid {grid_id} has been visited (center reached), clearing assignment")
-                del self.agent_assignments[agent_id]
-        
-        # Get unvisited grids from both levels
-        unvisited = self.get_unexplored_grids()
-
-        agents     = list(agent_positions.keys())
-        grid_list  = list(unvisited)
+        agents    = list(agent_positions)
+        grid_list = unvisited.copy()
         n_agents   = len(agents)
         n_grids    = len(grid_list)
         large_cost = 1000000.0
