@@ -866,39 +866,3 @@ class Explore(ExploreBaseParallelEnv):
 
     def render(self):
         super().render()
-
-if __name__ == "__main__":
-
-    # Single‐agent example
-    drone_ids = np.array([0, 1])
-    env = Explore(
-        drone_ids=drone_ids,
-        size=10,
-        num_drones=2,
-        threshold=0.1,
-        num_obstacles=3,
-        render_mode="human"
-    )
-
-    # Reset environment
-    observations, info = env.reset()
-    print("Initial observations:", observations)
-    print(f"Observation size: {env.observation_space(env.unwrapped.agents[0])}")
-
-    # Sample a random action for each agent and step once
-    actions = {agent: env._action_space(agent).sample() for agent in env.agents}
-    # print the assignment
-    # print the assignment
-    print("Current assignment:")
-    for agent, target in env.agent_targets.items():
-        print(f"  {agent} -> {target}")
-    observations, rewards, terminations, truncations, info = env.step(actions)
-
-    print("Next observations:", observations)
-    print("Rewards:", rewards)
-    print("Terminations:", terminations)
-    print("Truncations:", truncations)
-
-    env.render()
-    from time import sleep
-    sleep(5)

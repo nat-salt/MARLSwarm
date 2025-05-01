@@ -49,20 +49,20 @@ def parse_args():
     # Algorithm specific arguments
     parser.add_argument("--total-timesteps", type=int, default=1000000,
                         help="total timesteps of the experiments")
-    parser.add_argument("--buffer-size", type=int, default=int(1e4),
+    parser.add_argument("--buffer-size", type=int, default=int(1e6),
                         help="the replay memory buffer size")
     parser.add_argument("--gamma", type=float, default=0.99,
                         help="the discount factor gamma")
     parser.add_argument("--tau", type=float, default=0.005,
                         help="target smoothing coefficient (default: 0.005)")
-    parser.add_argument("--batch-size", type=int, default=256,
+    parser.add_argument("--batch-size", type=int, default=512,
                         help="the batch size of sample from the reply memory")
-    parser.add_argument("--learning-starts", type=int, default=5e3,
-                        help="timestep to start learning")
+    parser.add_argument("--learning-starts", type=int, default=1e4, 
+                        help="timestep to start learning")  # changed from 5e3
     parser.add_argument("--policy-lr", type=float, default=3e-4,
                         help="the learning rate of the policy network optimizer")
-    parser.add_argument("--q-lr", type=float, default=1e-3,
-                        help="the learning rate of the Q network network optimizer")
+    parser.add_argument("--q-lr", type=float, default=3e-4, 
+                        help="the learning rate of the Q network network optimizer")    # changed from 1e-3
     parser.add_argument("--policy-frequency", type=int, default=1,
                         help="the frequency of training policy (delayed)")
     parser.add_argument("--target-network-frequency", type=int, default=1,  # Denis Yarats' implementation delays this by 2.
@@ -81,16 +81,18 @@ class SoftQNetwork(nn.Module):
     def __init__(self, env: ParallelEnv):
         super().__init__()
         single_action_space = env.action_space(env.agents[0])
-        # Global state, joint actions space -> ... -> Q value
-        self.fc1 = nn.Linear(np.array(env.state().shape).prod() + np.prod(single_action_space.shape) * env.num_agents, 256)
+        in_dim = np.array(env.state().shape).prod() + np.prod(single_action_space.shape) * env.num_agents
+        self.fc1 = nn.Linear(in_dim, 256)
         self.fc2 = nn.Linear(256, 256)
-        self.fc3 = nn.Linear(256, 1)
-
+        self.fc3 = nn.Linear(256, 256)    # new hidden layer
+        self.fc4 = nn.Linear(256, 1)      # output
+        
     def forward(self, x, a):
-        x = torch.cat([x, a], 1)
+        x = torch.cat([x, a], dim=1)
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
-        x = self.fc3(x)
+        x = F.relu(self.fc3(x))          # new hidden activation
+        x = self.fc4(x)
         return x
 
 
@@ -103,11 +105,17 @@ class Actor(nn.Module):
         super().__init__()
         single_action_space = env.action_space(env.agents[0])
         single_observation_space = env.observation_space(env.agents[0])
-        # Local state, agent id -> ... -> local action
-        self.fc1 = nn.Linear(np.array(single_observation_space.shape).prod() + 1, 256)
+        in_dim = np.array(single_observation_space.shape).prod() + 1
+        
+        # local encoder
+        self.fc1 = nn.Linear(in_dim, 256)
         self.fc2 = nn.Linear(256, 256)
+        self.fc3 = nn.Linear(256, 256)    # new hidden layer
+        
+        # heads
         self.fc_mean = nn.Linear(256, np.prod(single_action_space.shape))
         self.fc_logstd = nn.Linear(256, np.prod(single_action_space.shape))
+        
         # action rescaling
         self.register_buffer(
             "action_scale", torch.tensor((single_action_space.high - single_action_space.low) / 2.0, dtype=torch.float32)
@@ -115,30 +123,31 @@ class Actor(nn.Module):
         self.register_buffer(
             "action_bias", torch.tensor((single_action_space.high + single_action_space.low) / 2.0, dtype=torch.float32)
         )
-
+        
     def forward(self, x):
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))          # new hidden activation
         mean = self.fc_mean(x)
         log_std = self.fc_logstd(x)
         log_std = torch.tanh(log_std)
-        log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std + 1)  # From SpinUp / Denis Yarats
-
+        log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std + 1)
         return mean, log_std
-
+    
     def get_action(self, x):
         mean, log_std = self(x)
         std = log_std.exp()
-        normal = torch.distributions.Normal(mean, std)
-        x_t = normal.rsample()  # for reparameterization trick (mean + std * N(0,1))
+        dist = torch.distributions.Normal(mean, std)
+        x_t = dist.rsample()
         y_t = torch.tanh(x_t)
         action = y_t * self.action_scale + self.action_bias
-        log_prob = normal.log_prob(x_t)
-        # Enforcing Action Bound
+        
+        log_prob = dist.log_prob(x_t)
         log_prob -= torch.log(self.action_scale * (1 - y_t.pow(2)) + 1e-6)
-        log_prob = log_prob.sum(1, keepdim=True)
-        mean = torch.tanh(mean) * self.action_scale + self.action_bias
-        return action, log_prob, mean
+        log_prob = log_prob.sum(dim=1, keepdim=True)
+        
+        mean_action = torch.tanh(mean) * self.action_scale + self.action_bias
+        return action, log_prob, mean_action
 
 
 def concat_id(local_obs: np.ndarray, id: AgentID) -> np.ndarray:
@@ -162,7 +171,7 @@ if __name__ == "__main__":
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    torch.backends.cudnn.deterministic = args.torch_deterministic
+    # torch.backends.cudnn.deterministic = args.torch_deterministic
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
     # device = torch.device("mps") if torch.backends.mps.is_available() else device
@@ -174,7 +183,7 @@ if __name__ == "__main__":
         size = 20,
         num_drones = 1,
         threshold = 0.2,
-        num_obstacles = 9,
+        num_obstacles = 4,
         render_mode = None
     )
     env.reset(seed=args.seed)
@@ -216,14 +225,17 @@ if __name__ == "__main__":
     obs, info = env.reset(seed=args.seed)
     global_return = 0.0
     global_obs: np.ndarray = env.state()
+    print(f'global observation state shape {global_obs.shape}')
 
     episode = 0
+    episode_steps = 0
         
     reward_list = []
     plot_data = []
-    log_f = open("agent-log.txt","w+")
+    log_f = open("explore-agent-log.txt","w+")
 
     for global_step in range(args.total_timesteps):
+        episode_steps += 1
         # ALGO LOGIC: put action logic here
         if global_step < args.learning_starts:
             actions: Dict[str, np.ndarray] = {agent: env.action_space(agent).sample() for agent in env.possible_agents}
@@ -352,29 +364,34 @@ if __name__ == "__main__":
                     target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
 
         if terminated or truncated:
-            print(f"episode={episode}, global_step={global_step}, global_return={global_return}")
+            print(f"episode={episode}, episode_length={episode_steps}, global_step={global_step}, global_return={global_return}")
         
             reward_list.append(global_return)
         
-            log_f.write(f'episode: {episode}, reward: {global_return}\n')
+            log_f.write(f'episode: {episode}, episode length: {episode_steps}, reward: {global_return}\n')
             log_f.flush()
             
             obs, info = env.reset()
 #             writer.add_scalar("charts/return", global_return, global_step)
             global_return = 0.0
             global_obs = env.state()
-        
+
+            episode_steps = 0
             episode += 1
 
             # Plot a graph
             if episode % 10 == 0:
                 plot_data.append([episode, np.array(reward_list).mean(), np.array(reward_list).std()])
                 reward_list = []
+                plt.clf()  # Clear the current figure before plotting
                 plt.plot([x[0] for x in plot_data], [x[1] for x in plot_data], '-', color='tab:grey')
                 plt.fill_between([x[0] for x in plot_data], [x[1]-x[2] for x in plot_data], [x[1]+x[2] for x in plot_data], alpha=0.2, color='tab:grey')
                 plt.xlabel('Episode number')
                 plt.ylabel('Episode reward')
-                plt.savefig('reward_plot.png')
+                plt.savefig('explore_reward_plot.png')
+            
+            if episode % 100 == 0:
+                torch.save(actor.state_dict(), f"actor_episode_{episode}.pth")
 
     # Saves the trained actor for execution
     torch.save(actor.state_dict(), "actor.pth")

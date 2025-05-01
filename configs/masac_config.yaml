@@ -3,7 +3,7 @@ environment:
   size: 20
   num_drones: 4
   threshold: 0.2
-  num_obstacles: 9
+  num_obstacles: 4
   render_mode: null   # Set to 'human' for visualization during traning
 
 # Training settings
