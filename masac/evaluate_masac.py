@@ -156,16 +156,19 @@ def main():
         print(f"Completed {n} agents")
 
     df = pd.DataFrame.from_records(records)
-    sns.set(style="whitegrid", palette="Set2")
+    # increase overall font sizes
+    sns.set(style="whitegrid", palette="Set2", font_scale=1.5)
 
     plt.figure(figsize=(10, 6))
     ax = sns.boxplot(x="agents", y="steps", hue="method",
-                     data=df, showfliers=True)   # now outliers are shown
-
-    ax.set_title("Coverage Steps to Completion: Baseline vs MASAC")
-    ax.set_xlabel("Number of Agents")
-    ax.set_ylabel("Steps to Completion")
-    plt.legend(title="")
+                     data=df, showfliers=True)
+    # bump up individual element sizes
+    ax.set_title("Coverage Steps to Completion: Baseline vs MASAC", fontsize=18)
+    ax.set_xlabel("Number of Agents", fontsize=16)
+    ax.set_ylabel("Steps to Completion", fontsize=16)
+    plt.legend(title="", fontsize=14)
+    plt.xticks(fontsize=14)
+    plt.yticks(fontsize=14)
     plt.tight_layout()
     plt.savefig("coverage_steps.png")
     plt.show()
